@@ -401,7 +401,7 @@ class TelegramBotUpdateHandler
             $updated = $result['data'] ?? null;
             $dateFormatted = $this->escapeHtml((string) ($updated['date_formatted'] ?? $param1));
             $time = $this->escapeHtml((string) ($updated['time'] ?? ($param1 === 'prog' ? '' : $param2)));
-            $building = $this->escapeHtml((string) ($updated['building'] ?? 'Center for Contemporary Art Tashkent (Building B, 6 Amir Temur str., Tashkent)'));
+            $building = $this->escapeHtml((string) ($updated['building'] ?? 'Centre for Contemporary Art Tashkent (Building B, 6 Amir Temur str., Tashkent)'));
             $eventTitle = ! empty($updated['event_title']) ? $this->escapeHtml((string) $updated['event_title']) : null;
 
             $lines = [
@@ -490,11 +490,11 @@ class TelegramBotUpdateHandler
 
         $badge = $this->escapeHtml((string) ($booking['badge'] ?? 'Visit Pass'));
         $time = $this->escapeHtml((string) ($booking['time'] ?? ''));
-        $building = $this->escapeHtml((string) ($booking['building'] ?? 'Center for Contemporary Art Tashkent (Building B, 6 Amir Temur str., Tashkent)'));
+        $building = $this->escapeHtml((string) ($booking['building'] ?? 'Centre for Contemporary Art Tashkent (Building B, 6 Amir Temur str., Tashkent)'));
         $status = $this->escapeHtml((string) ($booking['status_label'] ?? $statusText));
 
         $lines = [
-            '🏛 <b>Center for Contemporary Art Tashkent</b>',
+            '🏛 <b>Centre for Contemporary Art Tashkent</b>',
             "🎟 <b>{$badge}</b>",
             '',
             "👤 <b>Visitor:</b> {$name}",
@@ -717,7 +717,7 @@ class TelegramBotUpdateHandler
     private function sendWelcomeMessage(int|string $chatId): void
     {
         $text = "🏛 <b>Welcome to CCAT Booking Bot!</b>\n\n".
-            "This bot provides instant access to your <b>Center for Contemporary Art Tashkent</b> digital QR entrance passes.\n\n".
+            "This bot provides instant access to your <b>Centre for Contemporary Art Tashkent</b> digital QR entrance passes.\n\n".
             "✨ <b>Features:</b>\n".
             "• 🎟 Instant QR Code pass in PNG format\n".
             "• 📅 Change your visit or reading room booking time\n".

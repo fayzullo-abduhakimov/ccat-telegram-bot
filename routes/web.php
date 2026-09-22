@@ -12,7 +12,7 @@ Route::post('/api/telegram/webhook', [TelegramWebhookController::class, 'handle'
 
 Route::get('/', function (TelegramService $telegram, CcatBookingService $ccat) {
     return response()->json([
-        'service' => 'Center for Contemporary Art Tashkent - Telegram Bot Service',
+        'service' => 'Centre for Contemporary Art Tashkent - Telegram Bot Service',
         'status' => 'active',
         'bot_username' => config('telegram.bot_username'),
         'bot_configured' => $telegram->isConfigured(),

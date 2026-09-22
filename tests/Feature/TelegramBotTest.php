@@ -472,7 +472,7 @@ class TelegramBotTest extends TestCase
                     'event_title' => '<p>New Programme Title</p>',
                     'date_formatted' => '01 October 2026',
                     'time' => '',
-                    'building' => 'Center for Contemporary Art Tashkent',
+                    'building' => 'Centre for Contemporary Art Tashkent',
                 ],
             ], 200),
             "*/booking/{$ref}" => Http::response([
@@ -486,7 +486,7 @@ class TelegramBotTest extends TestCase
                     'date_formatted' => '01 October 2026',
                     'time' => '',
                     'status_label' => 'Pending',
-                    'building' => 'Center for Contemporary Art Tashkent',
+                    'building' => 'Centre for Contemporary Art Tashkent',
                     'event_title' => 'New Programme Title',
                     'qr_png_base64' => base64_encode('fake-qr'),
                 ],
@@ -996,7 +996,7 @@ class TelegramBotTest extends TestCase
                     'c28' => str_contains($text, '📲 Для прохода в библиотеку предъявите данный QR-код на входе.'),
                 ];
 
-                return !in_array(false, $checks, true);
+                return ! in_array(false, $checks, true);
             }
 
             return false;

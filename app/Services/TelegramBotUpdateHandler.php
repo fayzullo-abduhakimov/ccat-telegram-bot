@@ -115,7 +115,7 @@ class TelegramBotUpdateHandler
         if (! $booking) {
             $this->telegram->sendMessage(
                 $chatId,
-                "❌ <b>Booking Not Found</b>\n\nWe could not find an active booking matching reference <code>".$this->escapeHtml($token)."</code>.\n\nPlease check your confirmation on <a href=\"https://ccat.uz\">ccat.uz</a>."
+                "❌ <b>Booking Not Found</b>\n\nWe could not find an active booking matching reference <code>" . $this->escapeHtml($token) . "</code>.\n\nPlease check your confirmation on <a href=\"https://ccat.uz\">ccat.uz</a>."
             );
 
             return;
@@ -185,10 +185,10 @@ class TelegramBotUpdateHandler
             return;
         }
 
-        $name = $booking ? ' ('.$this->escapeHtml((string) ($booking['name'] ?? '')).')' : '';
+        $name = $booking ? ' (' . $this->escapeHtml((string) ($booking['name'] ?? '')) . ')' : '';
 
-        $text = "⚠️ <b>Cancel Booking{$name}?</b>\n\n".
-            "Are you sure you want to cancel your reservation?\n".
+        $text = "⚠️ <b>Cancel Booking{$name}?</b>\n\n" .
+            "Are you sure you want to cancel your reservation?\n" .
             'Your reserved slot will be freed immediately and cannot be held.';
 
         $keyboard = [
@@ -222,8 +222,8 @@ class TelegramBotUpdateHandler
         if ($result['success'] ?? false) {
             $this->telegram->answerCallbackQuery($queryId, 'Booking cancelled successfully', true);
 
-            $text = "✅ <b>Booking Cancelled</b>\n\n".
-                "Your reservation has been cancelled and your place has been released.\n\n".
+            $text = "✅ <b>Booking Cancelled</b>\n\n" .
+                "Your reservation has been cancelled and your place has been released.\n\n" .
                 'If you would like to book a visit at another time, please register at <a href="https://ccat.uz">ccat.uz</a>.';
 
             $this->telegram->sendMessage($chatId, $text);
@@ -255,7 +255,7 @@ class TelegramBotUpdateHandler
             $this->telegram->answerCallbackQuery($queryId, $msg, true);
             $this->telegram->sendMessage(
                 $chatId,
-                "ℹ️ <b>Cannot Change Time</b>\n\n".$this->escapeHtml((string) ($slotsData['message'] ?? 'There are currently no open slots available for rescheduling. Please check back later or visit ccat.uz.')),
+                "ℹ️ <b>Cannot Change Time</b>\n\n" . $this->escapeHtml((string) ($slotsData['message'] ?? 'There are currently no open slots available for rescheduling. Please check back later or visit ccat.uz.')),
                 ['inline_keyboard' => [[['text' => '🔙 Back to Booking', 'callback_data' => "view:{$ref}"]]]]
             );
 
@@ -270,7 +270,7 @@ class TelegramBotUpdateHandler
             $inlineKeyboard = [];
             foreach (array_slice($slotsData['days'], 0, 8) as $prog) {
                 $rawTitle = trim(strip_tags((string) ($prog['title'] ?? 'Event')));
-                $btnText = '🎭 '.mb_substr($rawTitle, 0, 24);
+                $btnText = '🎭 ' . mb_substr($rawTitle, 0, 24);
                 if (! empty($prog['date'])) {
                     $btnText .= " ({$prog['date']})";
                 }
@@ -461,7 +461,7 @@ class TelegramBotUpdateHandler
         if ($type === 'programme') {
             $locales = ['en', 'uz', 'ru'];
             $blocks = array_map(
-                fn (string $loc) => $this->formatProgrammeBlock($booking, $loc, $name, $token, $isVerified),
+                fn(string $loc) => $this->formatProgrammeBlock($booking, $loc, $name, $token, $isVerified),
                 $locales
             );
 
@@ -471,7 +471,7 @@ class TelegramBotUpdateHandler
         if ($type === 'visit') {
             $locales = ['en', 'uz', 'ru'];
             $blocks = array_map(
-                fn (string $loc) => $this->formatVisitBlock($booking, $loc, $name, $token, $isVerified),
+                fn(string $loc) => $this->formatVisitBlock($booking, $loc, $name, $token, $isVerified),
                 $locales
             );
 
@@ -481,7 +481,7 @@ class TelegramBotUpdateHandler
         if ($type === 'library') {
             $locales = ['en', 'uz', 'ru'];
             $blocks = array_map(
-                fn (string $loc) => $this->formatLibraryBlock($booking, $loc, $name, $token, $isVerified),
+                fn(string $loc) => $this->formatLibraryBlock($booking, $loc, $name, $token, $isVerified),
                 $locales
             );
 
@@ -544,8 +544,8 @@ class TelegramBotUpdateHandler
             ? __('pass.status_verified', [], $locale)
             : __('pass.status_confirmed', [], $locale);
         $footer = $isVerified
-            ? '✅ <i>'.__('pass.footer_verified', [], $locale).'</i>'
-            : '📲 '.__('pass.footer_confirmed', [], $locale);
+            ? '✅ <i>' . __('pass.footer_verified', [], $locale) . '</i>'
+            : '📲 ' . __('pass.footer_confirmed', [], $locale);
 
         $date = $this->escapeHtml((string) ($trans['date_formatted'] ?? ($booking['date_formatted'] ?? ($booking['date'] ?? ''))));
 
@@ -569,21 +569,21 @@ class TelegramBotUpdateHandler
             "🏛 <b>{$header}</b>",
             "🎟 <b>{$passTitle}</b>",
             '',
-            '👤 <b>'.__('pass.visitor', [], $locale).":</b> {$name}",
-            '📅 <b>'.__('pass.date', [], $locale).":</b> {$date}",
+            '👤 <b>' . __('pass.visitor', [], $locale) . ":</b> {$name}",
+            '📅 <b>' . __('pass.date', [], $locale) . ":</b> {$date}",
         ];
 
         $time = trim((string) ($booking['time'] ?? ''));
         if (! empty($time) && $time !== '00:00') {
-            $lines[] = '🕒 <b>'.__('pass.time', [], $locale).':</b> '.$this->escapeHtml($time);
+            $lines[] = '🕒 <b>' . __('pass.time', [], $locale) . ':</b> ' . $this->escapeHtml($time);
         }
 
-        $lines[] = '📍 <b>'.__('pass.building', [], $locale).":</b> {$building}";
+        $lines[] = '📍 <b>' . __('pass.building', [], $locale) . ":</b> {$building}";
         if (! empty($eventDisplay)) {
-            $lines[] = '🎨 <b>'.__('pass.event', [], $locale).":</b> {$eventDisplay}";
+            $lines[] = '🎨 <b>' . __('pass.event', [], $locale) . ":</b> {$eventDisplay}";
         }
-        $lines[] = '✅ <b>'.__('pass.status', [], $locale).":</b> {$statusText}";
-        $lines[] = '🔖 <b>'.__('pass.ref', [], $locale).":</b> <code>{$token}</code>";
+        $lines[] = '✅ <b>' . __('pass.status', [], $locale) . ":</b> {$statusText}";
+        $lines[] = '🔖 <b>' . __('pass.ref', [], $locale) . ":</b> <code>{$token}</code>";
         $lines[] = '';
         $lines[] = $footer;
 
@@ -607,33 +607,33 @@ class TelegramBotUpdateHandler
             ? __('pass.status_verified', [], $locale)
             : __('pass.status_confirmed', [], $locale);
         $footer = $isVerified
-            ? '✅ <i>'.__('pass.visit_footer_verified', [], $locale).'</i>'
-            : '📲 '.__('pass.visit_footer_confirmed', [], $locale);
+            ? '✅ <i>' . __('pass.visit_footer_verified', [], $locale) . '</i>'
+            : '📲 ' . __('pass.visit_footer_confirmed', [], $locale);
 
         $date = $this->escapeHtml((string) ($trans['date_formatted'] ?? ($booking['date_formatted'] ?? ($booking['date'] ?? ''))));
         $time = $this->escapeHtml((string) ($booking['time'] ?? ''));
 
-        $bldg = (string) ($trans['building'] ?? '');
-        if (empty($bldg)) {
-            $bldg = __('pass.visit_building_default', [], $locale);
-        }
-        $building = $this->escapeHtml($bldg);
+        $bldg = __('pass.visit_building_default', [], $locale);
 
+        $building = $this->escapeHtml($bldg);
+        $mapUrl = 'https://yandex.com/maps/org/toshkent_zamonaviy_san_at_markazi/137769933130?si=6rjq924p4qvrv7t8abkdnqzef0';
+        $escapedMapUrl = htmlspecialchars($mapUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $buildingDisplay = "<a href=\"{$escapedMapUrl}\">{$building}</a>";
         $lines = [
             "🏛 <b>{$header}</b>",
             "🎟 <b>{$passTitle}</b>",
             '',
-            '👤 <b>'.__('pass.visitor', [], $locale).":</b> {$name}",
-            '📅 <b>'.__('pass.date', [], $locale).":</b> {$date}",
+            '👤 <b>' . __('pass.visitor', [], $locale) . ":</b> {$name}",
+            '📅 <b>' . __('pass.date', [], $locale) . ":</b> {$date}",
         ];
 
         if (! empty($time)) {
-            $lines[] = '⏰ <b>'.__('pass.time', [], $locale).":</b> {$time}";
+            $lines[] = '⏰ <b>' . __('pass.time', [], $locale) . ":</b> {$time}";
         }
 
-        $lines[] = '📍 <b>'.__('pass.visit_building', [], $locale).":</b> {$building}";
-        $lines[] = '✅ <b>'.__('pass.status', [], $locale).":</b> {$statusText}";
-        $lines[] = '🔖 <b>'.__('pass.ref', [], $locale).":</b> <code>{$token}</code>";
+        $lines[] = '📍 <b>' . __('pass.visit_building', [], $locale) . ":</b> {$buildingDisplay}";
+        $lines[] = '✅ <b>' . __('pass.status', [], $locale) . ":</b> {$statusText}";
+        $lines[] = '🔖 <b>' . __('pass.ref', [], $locale) . ":</b> <code>{$token}</code>";
         $lines[] = '';
         $lines[] = $footer;
 
@@ -657,8 +657,8 @@ class TelegramBotUpdateHandler
             ? __('pass.status_verified', [], $locale)
             : __('pass.status_confirmed', [], $locale);
         $footer = $isVerified
-            ? '✅ <i>'.__('pass.library_footer_verified', [], $locale).'</i>'
-            : '📲 '.__('pass.library_footer_confirmed', [], $locale);
+            ? '✅ <i>' . __('pass.library_footer_verified', [], $locale) . '</i>'
+            : '📲 ' . __('pass.library_footer_confirmed', [], $locale);
 
         $date = $this->escapeHtml((string) ($trans['date_formatted'] ?? ($booking['date_formatted'] ?? ($booking['date'] ?? ''))));
         $time = $this->escapeHtml((string) ($booking['time'] ?? ''));
@@ -673,17 +673,17 @@ class TelegramBotUpdateHandler
             "🏛 <b>{$header}</b>",
             "🎟 <b>{$passTitle}</b>",
             '',
-            '👤 <b>'.__('pass.visitor', [], $locale).":</b> {$name}",
-            '📅 <b>'.__('pass.date', [], $locale).":</b> {$date}",
+            '👤 <b>' . __('pass.visitor', [], $locale) . ":</b> {$name}",
+            '📅 <b>' . __('pass.date', [], $locale) . ":</b> {$date}",
         ];
 
         if (! empty($time)) {
-            $lines[] = '⏰ <b>'.__('pass.time', [], $locale).":</b> {$time}";
+            $lines[] = '⏰ <b>' . __('pass.time', [], $locale) . ":</b> {$time}";
         }
 
-        $lines[] = '📍 <b>'.__('pass.library_location', [], $locale).":</b> {$building}";
-        $lines[] = '✅ <b>'.__('pass.status', [], $locale).":</b> {$statusText}";
-        $lines[] = '🔖 <b>'.__('pass.ref', [], $locale).":</b> <code>{$token}</code>";
+        $lines[] = '📍 <b>' . __('pass.library_location', [], $locale) . ":</b> {$building}";
+        $lines[] = '✅ <b>' . __('pass.status', [], $locale) . ":</b> {$statusText}";
+        $lines[] = '🔖 <b>' . __('pass.ref', [], $locale) . ":</b> <code>{$token}</code>";
         $lines[] = '';
         $lines[] = $footer;
 
@@ -716,14 +716,14 @@ class TelegramBotUpdateHandler
 
     private function sendWelcomeMessage(int|string $chatId): void
     {
-        $text = "🏛 <b>Welcome to CCAT Booking Bot!</b>\n\n".
-            "This bot provides instant access to your <b>Centre for Contemporary Art Tashkent</b> digital QR entrance passes.\n\n".
-            "✨ <b>Features:</b>\n".
-            "• 🎟 Instant QR Code pass in PNG format\n".
-            "• 📅 Change your visit or reading room booking time\n".
-            "• ❌ Cancel your booking anytime with one tap\n".
-            "• 🌐 Works for all CCAT bookings: General Visits, Library, and Programme Events\n\n".
-            "📲 <b>To get started:</b>\n".
+        $text = "🏛 <b>Welcome to CCAT Booking Bot!</b>\n\n" .
+            "This bot provides instant access to your <b>Centre for Contemporary Art Tashkent</b> digital QR entrance passes.\n\n" .
+            "✨ <b>Features:</b>\n" .
+            "• 🎟 Instant QR Code pass in PNG format\n" .
+            "• 📅 Change your visit or reading room booking time\n" .
+            "• ❌ Cancel your booking anytime with one tap\n" .
+            "• 🌐 Works for all CCAT bookings: General Visits, Library, and Programme Events\n\n" .
+            "📲 <b>To get started:</b>\n" .
             'Book your slot on <a href="https://ccat.uz">ccat.uz</a> and tap <b>"Get QR code via Telegram"</b> on your confirmation popup!';
 
         $this->telegram->sendMessage($chatId, $text);

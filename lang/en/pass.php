@@ -26,7 +26,7 @@ return [
     'visit_pass_title_confirmed' => 'General Visit Pass — Confirmed',
     'visit_pass_title_verified' => 'General Visit Pass — Verified',
     'visit_building' => 'Building',
-    'visit_building_default' => 'CCA Tashkent',
+    'visit_building_default' => 'Centre for Contemporary Arts Tashkent (Building B, 6 Amir Temur str., Tashkent)',
     'visit_footer_confirmed' => 'Please present this QR code at the entrance for admission.',
     'visit_footer_verified' => 'Admission verified at the entrance. Enjoy your visit!',
 
@@ -39,4 +39,3 @@ return [
     'library_footer_confirmed' => 'Please present this QR code at the entrance for admission.',
     'library_footer_verified' => 'Admission verified at the entrance. Enjoy your visit!',
 ];
-

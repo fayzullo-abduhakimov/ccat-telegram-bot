@@ -26,7 +26,7 @@ return [
     'visit_pass_title_confirmed' => 'Пропуск для общего посещения — регистрация подтверждена',
     'visit_pass_title_verified' => 'Пропуск для общего посещения — проверено',
     'visit_building' => 'Место',
-    'visit_building_default' => 'CCA Tashkent (Здание B, ул. Амира Темура, 6, Ташкент)',
+    'visit_building_default' => 'Центр современного искусства в Ташкенте (Здание B, ул. Амира Темура, 6, Ташкент)',
     'visit_footer_confirmed' => 'Для прохода в Центр предъявите данный QR-код на входе.',
     'visit_footer_verified' => 'Вход подтвержден. Приятного визита!',
 
@@ -39,4 +39,3 @@ return [
     'library_footer_confirmed' => 'Для прохода в библиотеку предъявите данный QR-код на входе.',
     'library_footer_verified' => 'Вход подтвержден. Приятного визита!',
 ];
-

@@ -17,16 +17,16 @@ class TestBookingCommand extends Command
     {
         $token = $this->argument('token');
 
-        $this->info("🔍 Querying CCAT booking API for token: {$token}...");
+        $this->info("Querying CCAT booking API for token: {$token}...");
         $booking = $ccat->getBooking($token);
 
         if (! $booking) {
-            $this->error('❌ Booking not found or CCAT API is unreachable at '.config('telegram.ccat_api_url'));
+            $this->error('Booking not found or CCAT API is unreachable at '.config('telegram.ccat_api_url'));
 
             return self::FAILURE;
         }
 
-        $this->info('✅ Booking found:');
+        $this->info('Booking found:');
         $this->table(
             ['Field', 'Value'],
             [
@@ -41,7 +41,7 @@ class TestBookingCommand extends Command
             ]
         );
 
-        $this->info("\n📅 Querying available slots for rescheduling...");
+        $this->info("\nQuerying available slots for rescheduling...");
         $slots = $ccat->getAvailableSlots($token);
 
         if ($slots && ! empty($slots['days'])) {

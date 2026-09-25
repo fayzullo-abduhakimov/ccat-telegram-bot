@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use Illuminate\Support\Facades\Cache;
+
 class TelegramBotUpdateHandler
 {
     public function __construct(
@@ -35,30 +37,61 @@ class TelegramBotUpdateHandler
             return;
         }
 
+        $from = $message['from'] ?? [];
+        $locale = $this->resolveLanguageCode($chatId, $from['language_code'] ?? null);
+
+        if (in_array($text, ['/language', '/lang', '🌐 Language', '🌐 Язык', '🌐 Til'], true) || str_starts_with($text, '🌐')) {
+            $this->sendLanguageSelection($chatId);
+
+            return;
+        }
+
         if (str_starts_with($text, '/start')) {
             $parts = explode(' ', $text, 2);
             $token = isset($parts[1]) ? trim($parts[1]) : '';
 
             if (! empty($token)) {
-                $this->sendBookingPass($chatId, $token);
+                $this->ccat->linkTelegramBooking($chatId, $token, [
+                    'username' => $from['username'] ?? null,
+                    'first_name' => $from['first_name'] ?? null,
+                    'last_name' => $from['last_name'] ?? null,
+                    'language_code' => $locale,
+                ]);
+
+                $this->sendBookingPass($chatId, $token, $locale);
 
                 return;
             }
 
-            $this->sendWelcomeMessage($chatId);
+            // Check if user has active bookings
+            $bookings = $this->ccat->getTelegramBookings($chatId, 'upcoming');
+            if (! empty($bookings)) {
+                $this->renderBookingsList($chatId, $bookings, $locale);
+
+                return;
+            }
+
+            $this->sendWelcomeMessage($chatId, $locale);
+
+            return;
+        }
+
+        if (in_array($text, ['/mybookings', '/bookings', '📋 My Bookings', '📋 Мои бронирования', '📋 Mening bandliklarim'], true) || str_starts_with($text, '📋')) {
+            $this->handleMyBookings($chatId, $locale);
 
             return;
         }
 
         if ($text === '/help') {
-            $this->sendWelcomeMessage($chatId);
+            $this->sendWelcomeMessage($chatId, $locale);
 
             return;
         }
 
         $this->telegram->sendMessage(
             $chatId,
-            "👋 Hello! To view your booking QR code and pass details, please use the <b>\"Get QR code via Telegram\"</b> button on your CCAT booking confirmation page.\n\nVisit <a href=\"https://ccat.uz\">ccat.uz</a> for information and bookings."
+            __('bot.welcome_body', [], $locale),
+            $this->getPersistentReplyMarkup($locale)
         );
     }
 
@@ -70,9 +103,25 @@ class TelegramBotUpdateHandler
         $queryId = (string) ($callbackQuery['id'] ?? '');
         $chatId = $callbackQuery['message']['chat']['id'] ?? null;
         $data = (string) ($callbackQuery['data'] ?? '');
+        $from = $callbackQuery['from'] ?? [];
+        $locale = $this->resolveLanguageCode($chatId, $from['language_code'] ?? null);
 
         if (! $chatId) {
             $this->telegram->answerCallbackQuery($queryId);
+
+            return;
+        }
+
+        if (str_starts_with($data, 'lang:') || str_starts_with($data, 'set_lang:')) {
+            $parts = explode(':', $data);
+            $newLang = $parts[1] ?? 'en';
+            $this->handleSetLanguage($queryId, $chatId, $newLang);
+
+            return;
+        }
+
+        if (in_array($data, ['my_bookings', 'my', 'bookings'], true)) {
+            $this->handleMyBookings($chatId, $locale, $queryId);
 
             return;
         }
@@ -93,39 +142,44 @@ class TelegramBotUpdateHandler
                 }
             }
 
-            $this->handleReschedule($queryId, $chatId, $ref, $param1, $param2);
+            $this->handleReschedule($queryId, $chatId, $ref, $param1, $param2, $locale);
 
             return;
         }
 
         match ($action) {
-            'view' => $this->handleViewPass($queryId, $chatId, $ref),
-            'c_conf', 'cancel_confirm' => $this->handleCancelConfirm($queryId, $chatId, $ref),
-            'c_do', 'cancel_do' => $this->handleCancelDo($queryId, $chatId, $ref),
-            'c_time', 'change_time' => $this->handleChangeTime($queryId, $chatId, $ref),
-            'day', 'pick_day' => $this->handlePickDay($queryId, $chatId, $ref, $parts[2] ?? ''),
+            'view' => $this->handleViewPass($queryId, $chatId, $ref, $locale),
+            'c_conf', 'cancel_confirm' => $this->handleCancelConfirm($queryId, $chatId, $ref, $locale),
+            'c_do', 'cancel_do' => $this->handleCancelDo($queryId, $chatId, $ref, $locale),
+            'c_time', 'change_time' => $this->handleChangeTime($queryId, $chatId, $ref, $locale),
+            'day', 'pick_day' => $this->handlePickDay($queryId, $chatId, $ref, $parts[2] ?? '', $locale),
             default => $this->telegram->answerCallbackQuery($queryId),
         };
     }
 
-    private function sendBookingPass(int|string $chatId, string $token): void
+    private function sendBookingPass(int|string $chatId, string $token, string $locale = 'en'): void
     {
         $booking = $this->ccat->getBooking($token);
 
         if (! $booking) {
+            $notFoundMsg = $locale === 'en'
+                ? "❌ <b>Booking Not Found</b>\n\nWe could not find an active booking matching reference <code>".$this->escapeHtml($token)."</code>.\n\nPlease check your confirmation on <a href=\"https://ccat.uz\">ccat.uz</a>."
+                : __('bot.booking_not_found', ['ref' => $this->escapeHtml($token)], $locale);
+
             $this->telegram->sendMessage(
                 $chatId,
-                "❌ <b>Booking Not Found</b>\n\nWe could not find an active booking matching reference <code>" . $this->escapeHtml($token) . "</code>.\n\nPlease check your confirmation on <a href=\"https://ccat.uz\">ccat.uz</a>."
+                $notFoundMsg,
+                $this->getPersistentReplyMarkup($locale)
             );
 
             return;
         }
 
         $ref = (string) ($booking['ref'] ?? substr((string) ($booking['token'] ?? $token), 0, 16));
-        $canChangeTime = ! empty($booking['can_change_time']) && (($booking['status'] ?? '') !== 'verified');
-        $canCancel = ! empty($booking['can_cancel']) && (($booking['status'] ?? '') !== 'verified');
+        $canChangeTime = ! empty($booking['can_change_time']) && (($booking['status'] ?? '') !== 'verified') && (($booking['status'] ?? '') !== 'cancelled');
+        $canCancel = ! empty($booking['can_cancel']) && (($booking['status'] ?? '') !== 'verified') && (($booking['status'] ?? '') !== 'cancelled');
         $caption = $this->formatBookingCaption($booking);
-        $keyboard = $this->buildBookingKeyboard($ref, $canChangeTime, $canCancel);
+        $keyboard = $this->buildBookingKeyboard($ref, $canChangeTime, $canCancel, $locale);
 
         $pngBytes = ! empty($booking['qr_png_base64'])
             ? base64_decode($booking['qr_png_base64'])
@@ -164,38 +218,38 @@ class TelegramBotUpdateHandler
         }
     }
 
-    private function handleViewPass(string $queryId, int|string $chatId, string $ref): void
+    private function handleViewPass(string $queryId, int|string $chatId, string $ref, string $locale = 'en'): void
     {
         $this->telegram->answerCallbackQuery($queryId);
-        $this->sendBookingPass($chatId, $ref);
+        $this->sendBookingPass($chatId, $ref, $locale);
     }
 
-    private function handleCancelConfirm(string $queryId, int|string $chatId, string $ref): void
+    private function handleCancelConfirm(string $queryId, int|string $chatId, string $ref, string $locale = 'en'): void
     {
         $this->telegram->answerCallbackQuery($queryId);
 
         $booking = $this->ccat->getBooking($ref);
-        if ($booking && (empty($booking['can_cancel']) || ($booking['status'] ?? '') === 'verified')) {
+        if ($booking && (empty($booking['can_cancel']) || ($booking['status'] ?? '') === 'verified' || ($booking['status'] ?? '') === 'cancelled')) {
             $this->telegram->sendMessage(
                 $chatId,
-                "⚠️ <b>Action Not Allowed</b>\n\nThis booking has already been verified and attendance recorded. It cannot be cancelled.",
-                ['inline_keyboard' => [[['text' => '🔙 Back to Booking', 'callback_data' => "view:{$ref}"]]]]
+                __('bot.action_not_allowed_cancel_verified', [], $locale),
+                ['inline_keyboard' => [[['text' => __('bot.btn_back_to_booking', [], $locale), 'callback_data' => "view:{$ref}"]]]]
             );
 
             return;
         }
 
-        $name = $booking ? ' (' . $this->escapeHtml((string) ($booking['name'] ?? '')) . ')' : '';
+        $name = $booking ? ' ('.$this->escapeHtml((string) ($booking['name'] ?? '')).')' : '';
 
-        $text = "⚠️ <b>Cancel Booking{$name}?</b>\n\n" .
-            "Are you sure you want to cancel your reservation?\n" .
-            'Your reserved slot will be freed immediately and cannot be held.';
+        $text = $locale === 'en'
+            ? "⚠️ <b>Cancel Booking{$name}?</b>\n\nAre you sure you want to cancel your reservation?\nYour reserved slot will be freed immediately and cannot be held."
+            : __('bot.cancel_confirm_prompt', ['ref' => $ref.$name], $locale);
 
         $keyboard = [
             'inline_keyboard' => [
                 [
-                    ['text' => '❌ Yes, Cancel Booking', 'callback_data' => "c_do:{$ref}"],
-                    ['text' => '🔙 Keep Booking', 'callback_data' => "view:{$ref}"],
+                    ['text' => __('bot.btn_confirm_cancel', [], $locale), 'callback_data' => "c_do:{$ref}"],
+                    ['text' => __('bot.btn_keep_booking', [], $locale), 'callback_data' => "view:{$ref}"],
                 ],
             ],
         ];
@@ -203,15 +257,15 @@ class TelegramBotUpdateHandler
         $this->telegram->sendMessage($chatId, $text, $keyboard);
     }
 
-    private function handleCancelDo(string $queryId, int|string $chatId, string $ref): void
+    private function handleCancelDo(string $queryId, int|string $chatId, string $ref, string $locale = 'en'): void
     {
         $booking = $this->ccat->getBooking($ref);
-        if ($booking && (empty($booking['can_cancel']) || ($booking['status'] ?? '') === 'verified')) {
-            $this->telegram->answerCallbackQuery($queryId, 'Verified bookings cannot be cancelled', true);
+        if ($booking && (empty($booking['can_cancel']) || ($booking['status'] ?? '') === 'verified' || ($booking['status'] ?? '') === 'cancelled')) {
+            $this->telegram->answerCallbackQuery($queryId, __('bot.action_not_allowed_cancel_verified', [], $locale), true);
             $this->telegram->sendMessage(
                 $chatId,
-                "⚠️ <b>Action Not Allowed</b>\n\nThis booking has already been verified and attendance recorded. It cannot be cancelled.",
-                ['inline_keyboard' => [[['text' => '🔙 Back to Booking', 'callback_data' => "view:{$ref}"]]]]
+                __('bot.action_not_allowed_cancel_verified', [], $locale),
+                ['inline_keyboard' => [[['text' => __('bot.btn_back_to_booking', [], $locale), 'callback_data' => "view:{$ref}"]]]]
             );
 
             return;
@@ -222,27 +276,31 @@ class TelegramBotUpdateHandler
         if ($result['success'] ?? false) {
             $this->telegram->answerCallbackQuery($queryId, 'Booking cancelled successfully', true);
 
-            $text = "✅ <b>Booking Cancelled</b>\n\n" .
-                "Your reservation has been cancelled and your place has been released.\n\n" .
-                'If you would like to book a visit at another time, please register at <a href="https://ccat.uz">ccat.uz</a>.';
+            $text = $locale === 'en'
+                ? "✅ <b>Booking Cancelled</b>\n\nYour reservation has been cancelled and your place has been released.\n\nIf you would like to book a visit at another time, please register at <a href=\"https://ccat.uz\">ccat.uz</a>."
+                : __('bot.cancel_success', [], $locale);
 
-            $this->telegram->sendMessage($chatId, $text);
+            $this->telegram->sendMessage(
+                $chatId,
+                $text,
+                $this->getPersistentReplyMarkup($locale)
+            );
         } else {
             $this->telegram->answerCallbackQuery($queryId, 'Error cancelling booking', true);
             $error = $this->escapeHtml((string) ($result['message'] ?? 'Could not cancel booking.'));
-            $this->telegram->sendMessage($chatId, "⚠️ <b>Cancellation Failed</b>\n\n{$error}");
+            $this->telegram->sendMessage($chatId, __('bot.cancel_failed', ['error' => $error], $locale));
         }
     }
 
-    private function handleChangeTime(string $queryId, int|string $chatId, string $ref): void
+    private function handleChangeTime(string $queryId, int|string $chatId, string $ref, string $locale = 'en'): void
     {
         $booking = $this->ccat->getBooking($ref);
-        if ($booking && (empty($booking['can_change_time']) || ($booking['status'] ?? '') === 'verified')) {
-            $this->telegram->answerCallbackQuery($queryId, 'Verified bookings cannot be changed', true);
+        if ($booking && (empty($booking['can_change_time']) || ($booking['status'] ?? '') === 'verified' || ($booking['status'] ?? '') === 'cancelled')) {
+            $this->telegram->answerCallbackQuery($queryId, __('bot.action_not_allowed_verified', [], $locale), true);
             $this->telegram->sendMessage(
                 $chatId,
-                "⚠️ <b>Action Not Allowed</b>\n\nThis booking has already been verified and attendance recorded. It cannot be rescheduled.",
-                ['inline_keyboard' => [[['text' => '🔙 Back to Booking', 'callback_data' => "view:{$ref}"]]]]
+                __('bot.action_not_allowed_verified', [], $locale),
+                ['inline_keyboard' => [[['text' => __('bot.btn_back_to_booking', [], $locale), 'callback_data' => "view:{$ref}"]]]]
             );
 
             return;
@@ -251,12 +309,12 @@ class TelegramBotUpdateHandler
         $slotsData = $this->ccat->getAvailableSlots($ref);
 
         if (! $slotsData || empty($slotsData['days'])) {
-            $msg = $slotsData['message'] ?? 'No available slots found';
-            $this->telegram->answerCallbackQuery($queryId, $msg, true);
+            $msg = $slotsData['message'] ?? __('bot.reschedule_no_slots', [], $locale);
+            $this->telegram->answerCallbackQuery($queryId, strip_tags($msg), true);
             $this->telegram->sendMessage(
                 $chatId,
-                "ℹ️ <b>Cannot Change Time</b>\n\n" . $this->escapeHtml((string) ($slotsData['message'] ?? 'There are currently no open slots available for rescheduling. Please check back later or visit ccat.uz.')),
-                ['inline_keyboard' => [[['text' => '🔙 Back to Booking', 'callback_data' => "view:{$ref}"]]]]
+                __('bot.reschedule_no_slots', [], $locale),
+                ['inline_keyboard' => [[['text' => __('bot.btn_back_to_booking', [], $locale), 'callback_data' => "view:{$ref}"]]]]
             );
 
             return;
@@ -270,7 +328,7 @@ class TelegramBotUpdateHandler
             $inlineKeyboard = [];
             foreach (array_slice($slotsData['days'], 0, 8) as $prog) {
                 $rawTitle = trim(strip_tags((string) ($prog['title'] ?? 'Event')));
-                $btnText = '🎭 ' . mb_substr($rawTitle, 0, 24);
+                $btnText = '🎭 '.mb_substr($rawTitle, 0, 24);
                 if (! empty($prog['date'])) {
                     $btnText .= " ({$prog['date']})";
                 }
@@ -278,11 +336,11 @@ class TelegramBotUpdateHandler
                     ['text' => $btnText, 'callback_data' => "res:{$ref}:prog:{$prog['id']}"],
                 ];
             }
-            $inlineKeyboard[] = [['text' => '🔙 Back to Booking', 'callback_data' => "view:{$ref}"]];
+            $inlineKeyboard[] = [['text' => __('bot.btn_back_to_booking', [], $locale), 'callback_data' => "view:{$ref}"]];
 
             $this->telegram->sendMessage(
                 $chatId,
-                '📅 <b>Select an Upcoming Programme:</b>',
+                '📅 <b>'.__('bot.reschedule_title', [], $locale).'</b>',
                 ['inline_keyboard' => $inlineKeyboard]
             );
 
@@ -307,25 +365,29 @@ class TelegramBotUpdateHandler
         }
 
         $inlineKeyboard[] = [
-            ['text' => '🔙 Back to Booking', 'callback_data' => "view:{$ref}"],
+            ['text' => __('bot.btn_back_to_booking', [], $locale), 'callback_data' => "view:{$ref}"],
         ];
+
+        $title = $locale === 'en'
+            ? "📅 <b>Change Booking Time</b>\n\nPlease select a new date for your visit:"
+            : __('bot.reschedule_title', [], $locale);
 
         $this->telegram->sendMessage(
             $chatId,
-            "📅 <b>Change Booking Time</b>\n\nPlease select a new date for your visit:",
+            $title,
             ['inline_keyboard' => $inlineKeyboard]
         );
     }
 
-    private function handlePickDay(string $queryId, int|string $chatId, string $ref, string $date): void
+    private function handlePickDay(string $queryId, int|string $chatId, string $ref, string $date, string $locale = 'en'): void
     {
         $booking = $this->ccat->getBooking($ref);
-        if ($booking && (empty($booking['can_change_time']) || ($booking['status'] ?? '') === 'verified')) {
-            $this->telegram->answerCallbackQuery($queryId, 'Verified bookings cannot be changed', true);
+        if ($booking && (empty($booking['can_change_time']) || ($booking['status'] ?? '') === 'verified' || ($booking['status'] ?? '') === 'cancelled')) {
+            $this->telegram->answerCallbackQuery($queryId, __('bot.action_not_allowed_verified', [], $locale), true);
             $this->telegram->sendMessage(
                 $chatId,
-                "⚠️ <b>Action Not Allowed</b>\n\nThis booking has already been verified and attendance recorded. It cannot be rescheduled.",
-                ['inline_keyboard' => [[['text' => '🔙 Back to Booking', 'callback_data' => "view:{$ref}"]]]]
+                __('bot.action_not_allowed_verified', [], $locale),
+                ['inline_keyboard' => [[['text' => __('bot.btn_back_to_booking', [], $locale), 'callback_data' => "view:{$ref}"]]]]
             );
 
             return;
@@ -370,18 +432,22 @@ class TelegramBotUpdateHandler
         }
 
         $inlineKeyboard[] = [
-            ['text' => '🔙 Back to Dates', 'callback_data' => "c_time:{$ref}"],
-            ['text' => '❌ Cancel', 'callback_data' => "view:{$ref}"],
+            ['text' => __('bot.btn_back_to_dates', [], $locale), 'callback_data' => "c_time:{$ref}"],
+            ['text' => __('bot.btn_back_to_booking', [], $locale), 'callback_data' => "view:{$ref}"],
         ];
+
+        $title = $locale === 'en'
+            ? "⏰ <b>Select Time for {$date}</b>\n\nChoose an available slot:"
+            : __('bot.reschedule_select_time', ['date' => $date], $locale);
 
         $this->telegram->sendMessage(
             $chatId,
-            "⏰ <b>Select Time for {$date}</b>\n\nChoose an available slot:",
+            $title,
             ['inline_keyboard' => $inlineKeyboard]
         );
     }
 
-    private function handleReschedule(string $queryId, int|string $chatId, string $ref, string $param1, string $param2): void
+    private function handleReschedule(string $queryId, int|string $chatId, string $ref, string $param1, string $param2, string $locale = 'en'): void
     {
         if ($param1 === 'prog') {
             $result = $this->ccat->rescheduleProgramme($ref, (int) $param2);
@@ -426,7 +492,7 @@ class TelegramBotUpdateHandler
 
             $this->telegram->sendMessage($chatId, implode("\n", $lines));
 
-            $this->sendBookingPass($chatId, $ref);
+            $this->sendBookingPass($chatId, $ref, $locale);
         } else {
             $this->telegram->answerCallbackQuery($queryId, 'Rescheduling failed', true);
             $error = $this->escapeHtml((string) ($result['message'] ?? 'Could not reschedule to this slot.'));
@@ -461,7 +527,7 @@ class TelegramBotUpdateHandler
         if ($type === 'programme') {
             $locales = ['en', 'uz', 'ru'];
             $blocks = array_map(
-                fn(string $loc) => $this->formatProgrammeBlock($booking, $loc, $name, $token, $isVerified),
+                fn (string $loc) => $this->formatProgrammeBlock($booking, $loc, $name, $token, $isVerified),
                 $locales
             );
 
@@ -471,7 +537,7 @@ class TelegramBotUpdateHandler
         if ($type === 'visit') {
             $locales = ['en', 'uz', 'ru'];
             $blocks = array_map(
-                fn(string $loc) => $this->formatVisitBlock($booking, $loc, $name, $token, $isVerified),
+                fn (string $loc) => $this->formatVisitBlock($booking, $loc, $name, $token, $isVerified),
                 $locales
             );
 
@@ -481,7 +547,7 @@ class TelegramBotUpdateHandler
         if ($type === 'library') {
             $locales = ['en', 'uz', 'ru'];
             $blocks = array_map(
-                fn(string $loc) => $this->formatLibraryBlock($booking, $loc, $name, $token, $isVerified),
+                fn (string $loc) => $this->formatLibraryBlock($booking, $loc, $name, $token, $isVerified),
                 $locales
             );
 
@@ -544,8 +610,8 @@ class TelegramBotUpdateHandler
             ? __('pass.status_verified', [], $locale)
             : __('pass.status_confirmed', [], $locale);
         $footer = $isVerified
-            ? '✅ <i>' . __('pass.footer_verified', [], $locale) . '</i>'
-            : '📲 ' . __('pass.footer_confirmed', [], $locale);
+            ? '✅ <i>'.__('pass.footer_verified', [], $locale).'</i>'
+            : '📲 '.__('pass.footer_confirmed', [], $locale);
 
         $date = $this->escapeHtml((string) ($trans['date_formatted'] ?? ($booking['date_formatted'] ?? ($booking['date'] ?? ''))));
 
@@ -569,21 +635,21 @@ class TelegramBotUpdateHandler
             "🏛 <b>{$header}</b>",
             "🎟 <b>{$passTitle}</b>",
             '',
-            '👤 <b>' . __('pass.visitor', [], $locale) . ":</b> {$name}",
-            '📅 <b>' . __('pass.date', [], $locale) . ":</b> {$date}",
+            '👤 <b>'.__('pass.visitor', [], $locale).":</b> {$name}",
+            '📅 <b>'.__('pass.date', [], $locale).":</b> {$date}",
         ];
 
         $time = trim((string) ($booking['time'] ?? ''));
         if (! empty($time) && $time !== '00:00') {
-            $lines[] = '🕒 <b>' . __('pass.time', [], $locale) . ':</b> ' . $this->escapeHtml($time);
+            $lines[] = '🕒 <b>'.__('pass.time', [], $locale).':</b> '.$this->escapeHtml($time);
         }
 
-        $lines[] = '📍 <b>' . __('pass.building', [], $locale) . ":</b> {$building}";
+        $lines[] = '📍 <b>'.__('pass.building', [], $locale).":</b> {$building}";
         if (! empty($eventDisplay)) {
-            $lines[] = '🎨 <b>' . __('pass.event', [], $locale) . ":</b> {$eventDisplay}";
+            $lines[] = '🎨 <b>'.__('pass.event', [], $locale).":</b> {$eventDisplay}";
         }
-        $lines[] = '✅ <b>' . __('pass.status', [], $locale) . ":</b> {$statusText}";
-        $lines[] = '🔖 <b>' . __('pass.ref', [], $locale) . ":</b> <code>{$token}</code>";
+        $lines[] = '✅ <b>'.__('pass.status', [], $locale).":</b> {$statusText}";
+        $lines[] = '🔖 <b>'.__('pass.ref', [], $locale).":</b> <code>{$token}</code>";
         $lines[] = '';
         $lines[] = $footer;
 
@@ -607,8 +673,8 @@ class TelegramBotUpdateHandler
             ? __('pass.status_verified', [], $locale)
             : __('pass.status_confirmed', [], $locale);
         $footer = $isVerified
-            ? '✅ <i>' . __('pass.visit_footer_verified', [], $locale) . '</i>'
-            : '📲 ' . __('pass.visit_footer_confirmed', [], $locale);
+            ? '✅ <i>'.__('pass.visit_footer_verified', [], $locale).'</i>'
+            : '📲 '.__('pass.visit_footer_confirmed', [], $locale);
 
         $date = $this->escapeHtml((string) ($trans['date_formatted'] ?? ($booking['date_formatted'] ?? ($booking['date'] ?? ''))));
         $time = $this->escapeHtml((string) ($booking['time'] ?? ''));
@@ -623,17 +689,17 @@ class TelegramBotUpdateHandler
             "🏛 <b>{$header}</b>",
             "🎟 <b>{$passTitle}</b>",
             '',
-            '👤 <b>' . __('pass.visitor', [], $locale) . ":</b> {$name}",
-            '📅 <b>' . __('pass.date', [], $locale) . ":</b> {$date}",
+            '👤 <b>'.__('pass.visitor', [], $locale).":</b> {$name}",
+            '📅 <b>'.__('pass.date', [], $locale).":</b> {$date}",
         ];
 
         if (! empty($time)) {
-            $lines[] = '⏰ <b>' . __('pass.time', [], $locale) . ":</b> {$time}";
+            $lines[] = '⏰ <b>'.__('pass.time', [], $locale).":</b> {$time}";
         }
 
-        $lines[] = '📍 <b>' . __('pass.visit_building', [], $locale) . ":</b> {$buildingDisplay}";
-        $lines[] = '✅ <b>' . __('pass.status', [], $locale) . ":</b> {$statusText}";
-        $lines[] = '🔖 <b>' . __('pass.ref', [], $locale) . ":</b> <code>{$token}</code>";
+        $lines[] = '📍 <b>'.__('pass.visit_building', [], $locale).":</b> {$buildingDisplay}";
+        $lines[] = '✅ <b>'.__('pass.status', [], $locale).":</b> {$statusText}";
+        $lines[] = '🔖 <b>'.__('pass.ref', [], $locale).":</b> <code>{$token}</code>";
         $lines[] = '';
         $lines[] = $footer;
 
@@ -657,8 +723,8 @@ class TelegramBotUpdateHandler
             ? __('pass.status_verified', [], $locale)
             : __('pass.status_confirmed', [], $locale);
         $footer = $isVerified
-            ? '✅ <i>' . __('pass.library_footer_verified', [], $locale) . '</i>'
-            : '📲 ' . __('pass.library_footer_confirmed', [], $locale);
+            ? '✅ <i>'.__('pass.library_footer_verified', [], $locale).'</i>'
+            : '📲 '.__('pass.library_footer_confirmed', [], $locale);
 
         $date = $this->escapeHtml((string) ($trans['date_formatted'] ?? ($booking['date_formatted'] ?? ($booking['date'] ?? ''))));
         $time = $this->escapeHtml((string) ($booking['time'] ?? ''));
@@ -673,17 +739,17 @@ class TelegramBotUpdateHandler
             "🏛 <b>{$header}</b>",
             "🎟 <b>{$passTitle}</b>",
             '',
-            '👤 <b>' . __('pass.visitor', [], $locale) . ":</b> {$name}",
-            '📅 <b>' . __('pass.date', [], $locale) . ":</b> {$date}",
+            '👤 <b>'.__('pass.visitor', [], $locale).":</b> {$name}",
+            '📅 <b>'.__('pass.date', [], $locale).":</b> {$date}",
         ];
 
         if (! empty($time)) {
-            $lines[] = '⏰ <b>' . __('pass.time', [], $locale) . ":</b> {$time}";
+            $lines[] = '⏰ <b>'.__('pass.time', [], $locale).":</b> {$time}";
         }
 
-        $lines[] = '📍 <b>' . __('pass.library_location', [], $locale) . ":</b> {$building}";
-        $lines[] = '✅ <b>' . __('pass.status', [], $locale) . ":</b> {$statusText}";
-        $lines[] = '🔖 <b>' . __('pass.ref', [], $locale) . ":</b> <code>{$token}</code>";
+        $lines[] = '📍 <b>'.__('pass.library_location', [], $locale).":</b> {$building}";
+        $lines[] = '✅ <b>'.__('pass.status', [], $locale).":</b> {$statusText}";
+        $lines[] = '🔖 <b>'.__('pass.ref', [], $locale).":</b> <code>{$token}</code>";
         $lines[] = '';
         $lines[] = $footer;
 
@@ -693,40 +759,201 @@ class TelegramBotUpdateHandler
     /**
      * @return array<string, mixed>|null
      */
-    private function buildBookingKeyboard(string $ref, bool $canChangeTime = true, bool $canCancel = true): ?array
+    private function buildBookingKeyboard(string $ref, bool $canChangeTime = true, bool $canCancel = true, string $locale = 'en'): ?array
     {
         $buttons = [];
         if ($canChangeTime) {
-            $buttons[] = ['text' => '📅 Change Time', 'callback_data' => "c_time:{$ref}"];
+            $buttons[] = ['text' => __('bot.btn_change_time', [], $locale), 'callback_data' => "c_time:{$ref}"];
         }
         if ($canCancel) {
-            $buttons[] = ['text' => '❌ Cancel Booking', 'callback_data' => "c_conf:{$ref}"];
+            $buttons[] = ['text' => __('bot.btn_cancel_booking', [], $locale), 'callback_data' => "c_conf:{$ref}"];
         }
 
-        if (empty($buttons)) {
-            return null;
+        $rows = [];
+        if (! empty($buttons)) {
+            $rows[] = $buttons;
         }
+
+        $rows[] = [
+            ['text' => __('bot.btn_my_bookings', [], $locale), 'callback_data' => 'my_bookings'],
+        ];
 
         return [
-            'inline_keyboard' => [
-                $buttons,
-            ],
+            'inline_keyboard' => $rows,
         ];
     }
 
-    private function sendWelcomeMessage(int|string $chatId): void
+    private function handleMyBookings(int|string $chatId, string $locale = 'en', ?string $queryId = null): void
     {
-        $text = "🏛 <b>Welcome to CCAT Booking Bot!</b>\n\n" .
-            "This bot provides instant access to your <b>Centre for Contemporary Art Tashkent</b> digital QR entrance passes.\n\n" .
-            "✨ <b>Features:</b>\n" .
-            "• 🎟 Instant QR Code pass in PNG format\n" .
-            "• 📅 Change your visit or reading room booking time\n" .
-            "• ❌ Cancel your booking anytime with one tap\n" .
-            "• 🌐 Works for all CCAT bookings: General Visits, Library, and Programme Events\n\n" .
-            "📲 <b>To get started:</b>\n" .
-            'Book your slot on <a href="https://ccat.uz">ccat.uz</a> and tap <b>"Get QR code via Telegram"</b> on your confirmation popup!';
+        if ($queryId !== null) {
+            $this->telegram->answerCallbackQuery($queryId);
+        }
 
-        $this->telegram->sendMessage($chatId, $text);
+        $bookings = $this->ccat->getTelegramBookings($chatId, 'upcoming');
+
+        if (empty($bookings)) {
+            $this->telegram->sendMessage(
+                $chatId,
+                __('bot.my_bookings_empty', [], $locale),
+                $this->getPersistentReplyMarkup($locale)
+            );
+
+            return;
+        }
+
+        $this->renderBookingsList($chatId, $bookings, $locale);
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $bookings
+     */
+    private function renderBookingsList(int|string $chatId, array $bookings, string $locale): void
+    {
+        $lines = [
+            __('bot.my_bookings_list', [], $locale),
+            '',
+        ];
+
+        $buttons = [];
+
+        foreach ($bookings as $idx => $b) {
+            $ref = (string) ($b['ref'] ?? substr((string) ($b['token'] ?? ''), 0, 16));
+            $type = (string) ($b['type'] ?? 'visit');
+            $typeEmoji = match ($type) {
+                'programme' => '🎭',
+                'library' => '📚',
+                default => '🏛',
+            };
+            $date = (string) ($b['date_formatted'] ?? ($b['date'] ?? ''));
+            $time = ! empty($b['time']) ? " {$b['time']}" : '';
+            $title = ! empty($b['event_title']) ? " — {$b['event_title']}" : '';
+            $visitor = ! empty($b['name']) ? " ({$b['name']})" : '';
+
+            $lines[] = sprintf('%d. %s <b>%s</b>%s%s', $idx + 1, $typeEmoji, $date.$time, $title, $visitor);
+
+            $btnLabel = sprintf('%s %s%s', $typeEmoji, $date, $time);
+            $buttons[] = [
+                ['text' => mb_substr($btnLabel, 0, 36), 'callback_data' => "view:{$ref}"],
+            ];
+        }
+
+        $keyboard = ['inline_keyboard' => $buttons];
+
+        $this->telegram->sendMessage(
+            $chatId,
+            implode("\n", $lines),
+            $keyboard
+        );
+    }
+
+    private function sendWelcomeMessage(int|string $chatId, string $locale = 'en'): void
+    {
+        $header = $locale === 'en' ? 'Welcome to CCAT Booking Bot!' : __('bot.welcome_header', [], $locale);
+        $text = "🏛 <b>{$header}</b>\n\n".__('bot.welcome_body', [], $locale);
+
+        $this->telegram->sendMessage(
+            $chatId,
+            $text,
+            $this->getPersistentReplyMarkup($locale)
+        );
+    }
+
+    private function sendLanguageSelection(int|string $chatId): void
+    {
+        $keyboard = [
+            'inline_keyboard' => [
+                [
+                    ['text' => '🇷🇺 Русский', 'callback_data' => 'lang:ru'],
+                    ['text' => '🇺🇿 O‘zbekcha', 'callback_data' => 'lang:uz'],
+                    ['text' => '🇬🇧 English', 'callback_data' => 'lang:en'],
+                ],
+            ],
+        ];
+
+        $this->telegram->sendMessage(
+            $chatId,
+            '🌐 <b>Choose language / Выберите язык / Tilni tanlang:</b>',
+            $keyboard
+        );
+    }
+
+    private function handleSetLanguage(string $queryId, int|string $chatId, string $newLang): void
+    {
+        $locale = $this->normalizeLanguageCode($newLang);
+        try {
+            Cache::put("tg_lang_{$chatId}", $locale, now()->addDays(90));
+        } catch (\Throwable) {
+        }
+
+        $this->ccat->updateTelegramLanguage($chatId, $locale);
+
+        $alert = match ($locale) {
+            'ru' => '✅ Язык изменён на Русский',
+            'uz' => '✅ Til O‘zbekchaga o‘zgartirildi',
+            default => '✅ Language changed to English',
+        };
+
+        $this->telegram->answerCallbackQuery($queryId, $alert, true);
+
+        $msg = match ($locale) {
+            'ru' => "✅ <b>Язык успешно изменён на Русский.</b>\n\nИспользуйте меню ниже для навигации.",
+            'uz' => "✅ <b>Til muvaffaqiyatli O‘zbekchaga o‘zgartirildi.</b>\n\nQuyidagi menyudan foydalanishingiz mumkin.",
+            default => "✅ <b>Language successfully changed to English.</b>\n\nYou can use the menu below to navigate.",
+        };
+
+        $this->telegram->sendMessage(
+            $chatId,
+            $msg,
+            $this->getPersistentReplyMarkup($locale)
+        );
+    }
+
+    private function resolveLanguageCode(int|string $chatId, ?string $telegramLang): string
+    {
+        try {
+            $cached = Cache::get("tg_lang_{$chatId}");
+            if ($cached && in_array($cached, ['ru', 'uz', 'en'], true)) {
+                return $cached;
+            }
+        } catch (\Throwable) {
+        }
+
+        return $this->normalizeLanguageCode($telegramLang);
+    }
+
+    private function normalizeLanguageCode(?string $code): string
+    {
+        if (empty($code)) {
+            return 'en';
+        }
+
+        $short = strtolower(substr(trim($code), 0, 2));
+
+        return in_array($short, ['uz', 'ru'], true) ? $short : 'en';
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function getPersistentReplyMarkup(string $locale): array
+    {
+        $label = __('bot.menu_my_bookings', [], $locale);
+        $langBtn = match ($locale) {
+            'ru' => '🌐 Язык',
+            'uz' => '🌐 Til',
+            default => '🌐 Language',
+        };
+
+        return [
+            'keyboard' => [
+                [
+                    ['text' => $label],
+                    ['text' => $langBtn],
+                ],
+            ],
+            'resize_keyboard' => true,
+            'is_persistent' => true,
+        ];
     }
 
     private function escapeHtml(?string $text): string

@@ -179,4 +179,68 @@ class CcatBookingService
             ];
         }
     }
+
+    /**
+     * @param  array<string, mixed>  $userData
+     * @return array<string, mixed>|null
+     */
+    public function linkTelegramBooking(int|string $chatId, string $token, array $userData = []): ?array
+    {
+        try {
+            $response = $this->http()->post("{$this->baseUrl}/telegram/{$chatId}/bookings", [
+                'token' => $token,
+                'username' => $userData['username'] ?? null,
+                'first_name' => $userData['first_name'] ?? null,
+                'last_name' => $userData['last_name'] ?? null,
+                'language_code' => $userData['language_code'] ?? 'en',
+            ]);
+
+            if ($response->successful()) {
+                return $response->json('data');
+            }
+
+            return null;
+        } catch (\Throwable $e) {
+            Log::error('CcatBookingService: linkTelegramBooking failed: '.$e->getMessage());
+
+            return null;
+        }
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function getTelegramBookings(int|string $chatId, string $scope = 'upcoming'): array
+    {
+        try {
+            $response = $this->http()->get("{$this->baseUrl}/telegram/{$chatId}/bookings", [
+                'scope' => $scope,
+            ]);
+
+            if ($response->successful()) {
+                return $response->json('data') ?? [];
+            }
+
+            return [];
+        } catch (\Throwable $e) {
+            Log::error('CcatBookingService: getTelegramBookings failed: '.$e->getMessage());
+
+            return [];
+        }
+    }
+
+    public function updateTelegramLanguage(int|string $chatId, string $languageCode): bool
+    {
+        try {
+            $response = $this->http()->post("{$this->baseUrl}/telegram/{$chatId}/language", [
+                'language_code' => $languageCode,
+            ]);
+
+            return $response->successful();
+        } catch (\Throwable $e) {
+            Log::error('CcatBookingService: updateTelegramLanguage failed: '.$e->getMessage());
+
+            return false;
+        }
+    }
 }

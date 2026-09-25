@@ -31,8 +31,16 @@ class TelegramPollCommand extends Command
         }
 
         $botInfo = $bot['result'];
-        $this->info("🤖 Bot connected: @{$botInfo['username']} ({$botInfo['first_name']})");
-        $this->info("👂 Listening for updates... Press Ctrl+C to stop.\n");
+        $this->info("Bot connected: @{$botInfo['username']} ({$botInfo['first_name']})");
+
+        try {
+            $telegram->registerBotCommands();
+            $this->info('Registered bot commands with Telegram.');
+        } catch (\Throwable $e) {
+            $this->warn('Could not register bot commands: '.$e->getMessage());
+        }
+
+        $this->info("Listening for updates... Press Ctrl+C to stop.\n");
 
         $offset = 0;
         $timeout = (int) $this->option('timeout');
@@ -49,7 +57,7 @@ class TelegramPollCommand extends Command
                         $from = $update['message']['from']['first_name'] ?? 'User';
                         $text = $update['message']['text'] ?? '[media]';
                         $this->line(sprintf(
-                            '[%s] 💬 Message from %s: %s',
+                            '[%s] Message from %s: %s',
                             now()->format('H:i:s'),
                             $from,
                             $text
@@ -58,7 +66,7 @@ class TelegramPollCommand extends Command
                         $from = $update['callback_query']['from']['first_name'] ?? 'User';
                         $data = $update['callback_query']['data'] ?? '';
                         $this->line(sprintf(
-                            '[%s] 🔘 Button click by %s: %s',
+                            '[%s] Button click by %s: %s',
                             now()->format('H:i:s'),
                             $from,
                             $data

@@ -289,6 +289,50 @@ class TelegramService
     }
 
     /**
+     * @param  array<int, array{command: string, description: string}>  $commands
+     */
+    public function setMyCommands(array $commands, ?string $languageCode = null): ?array
+    {
+        $payload = [
+            'commands' => $commands,
+        ];
+
+        if (! empty($languageCode)) {
+            $payload['language_code'] = $languageCode;
+        }
+
+        return $this->post('setMyCommands', $payload);
+    }
+
+    public function registerBotCommands(): void
+    {
+        $commandsEn = [
+            ['command' => 'mybookings', 'description' => '📋 View my active bookings'],
+            ['command' => 'language', 'description' => '🌐 Change language / Сменить язык'],
+            ['command' => 'help', 'description' => 'ℹ️ How to use this bot'],
+            ['command' => 'start', 'description' => '🚀 Start / View bookings'],
+        ];
+
+        $commandsRu = [
+            ['command' => 'mybookings', 'description' => '📋 Мои активные бронирования'],
+            ['command' => 'language', 'description' => '🌐 Выбрать язык / Change language'],
+            ['command' => 'help', 'description' => 'ℹ️ О боте и контакты'],
+            ['command' => 'start', 'description' => '🚀 Главное меню / Мои бронирования'],
+        ];
+
+        $commandsUz = [
+            ['command' => 'mybookings', 'description' => '📋 Mening faol bandliklarim'],
+            ['command' => 'language', 'description' => '🌐 Tilni o‘zgartirish / Change language'],
+            ['command' => 'help', 'description' => 'ℹ️ Bot haqida ma’lumot'],
+            ['command' => 'start', 'description' => '🚀 Asosiy menyu / Bandliklarim'],
+        ];
+
+        $this->setMyCommands($commandsEn);
+        $this->setMyCommands($commandsRu, 'ru');
+        $this->setMyCommands($commandsUz, 'uz');
+    }
+
+    /**
      * @param  array<string, mixed>  $params
      */
     private function post(string $method, array $params, int $timeout = 15): ?array

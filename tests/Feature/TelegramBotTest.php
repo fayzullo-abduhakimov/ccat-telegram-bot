@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Services\TelegramService;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
@@ -869,7 +870,7 @@ class TelegramBotTest extends TestCase
                     && str_contains($text, '<b>Visitor:</b> Alisher Navoiy')
                     && str_contains($text, '<b>Date:</b> 18 September 2026')
                     && str_contains($text, '⏰ <b>Time:</b> 10:00')
-                    && str_contains($text, '<b>Building:</b> CCA Tashkent')
+                    && str_contains($text, '<b>Building:</b> <a href="https://yandex.com/maps/org/toshkent_zamonaviy_san_at_markazi/137769933130?si=6rjq924p4qvrv7t8abkdnqzef0">Centre for Contemporary Arts Tashkent (Building B, 6 Amir Temur str., Tashkent)</a>')
                     && str_contains($text, '<b>Status:</b> Confirmed')
                     && str_contains($text, "<b>Ref:</b> <code>{$token}</code>")
                     && str_contains($text, '📲 Please present this QR code at the entrance for admission.')
@@ -879,7 +880,7 @@ class TelegramBotTest extends TestCase
                     && str_contains($text, '<b>Mehmon:</b> Alisher Navoiy')
                     && str_contains($text, '<b>Sana:</b> 18-sentabr, 2026')
                     && str_contains($text, '⏰ <b>Vaqti:</b> 10:00')
-                    && str_contains($text, '<b>Bino:</b> Toshkent Zamonaviy san’at markazi (Toshkent shahri, Amir Temur ko‘chasi, 6-uy, B bino)')
+                    && str_contains($text, '<b>Bino:</b> <a href="https://yandex.com/maps/org/toshkent_zamonaviy_san_at_markazi/137769933130?si=6rjq924p4qvrv7t8abkdnqzef0">Toshkent Zamonaviy san’at markazi (Toshkent shahri, Amir Temur ko‘chasi, 6-uy, B bino)</a>')
                     && str_contains($text, '<b>Holati:</b> Tasdiqlangan')
                     && str_contains($text, "<b>Iqt:</b> <code>{$token}</code>")
                     && str_contains($text, '📲 Ushbu QR-kodni kirishda taqdim eting.')
@@ -888,7 +889,7 @@ class TelegramBotTest extends TestCase
                     && str_contains($text, '<b>Посетитель:</b> Alisher Navoiy')
                     && str_contains($text, '<b>Дата:</b> 18 сентября 2026 г.')
                     && str_contains($text, '⏰ <b>Время:</b> 10:00')
-                    && str_contains($text, '<b>Место:</b> CCA Tashkent (Здание B, ул. Амира Темура, 6, Ташкент)')
+                    && str_contains($text, '<b>Место:</b> <a href="https://yandex.com/maps/org/toshkent_zamonaviy_san_at_markazi/137769933130?si=6rjq924p4qvrv7t8abkdnqzef0">Центр современного искусства в Ташкенте (Здание B, ул. Амира Темура, 6, Ташкент)</a>')
                     && str_contains($text, '<b>Статус:</b> Регистрация подтверждена')
                     && str_contains($text, "<b>Номер регистрации:</b> <code>{$token}</code>")
                     && str_contains($text, '📲 Для прохода в Центр предъявите данный QR-код на входе.');
@@ -997,6 +998,425 @@ class TelegramBotTest extends TestCase
                 ];
 
                 return ! in_array(false, $checks, true);
+            }
+
+            return false;
+        });
+    }
+
+    public function test_webhook_handles_start_with_token_links_telegram_user(): void
+    {
+        $token = 'visit_token_link_test_123456';
+        $chatId = 99887766;
+
+        Http::fake([
+            "*/telegram/{$chatId}/bookings" => Http::response([
+                'success' => true,
+                'data' => [
+                    'user' => ['id' => 1, 'chat_id' => $chatId],
+                    'booking' => ['token' => $token],
+                ],
+            ], 200),
+            "*/booking/{$token}" => Http::response([
+                'success' => true,
+                'data' => [
+                    'type' => 'visit',
+                    'token' => $token,
+                    'ref' => substr($token, 0, 16),
+                    'name' => 'Fayzullo Abduhakimov',
+                    'first_name' => 'Fayzullo',
+                    'last_name' => 'Abduhakimov',
+                    'date' => '2026-09-25',
+                    'date_formatted' => '25 September 2026',
+                    'time' => '11:00',
+                    'building' => 'CCA Tashkent',
+                    'status' => 'confirmed',
+                    'status_label' => 'Confirmed',
+                    'qr_png_base64' => base64_encode('fake-qr'),
+                ],
+            ], 200),
+            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
+        ]);
+
+        config(['telegram.bot_token' => 'fake_bot_token']);
+
+        $update = [
+            'update_id' => 5001,
+            'message' => [
+                'message_id' => 501,
+                'from' => [
+                    'id' => $chatId,
+                    'username' => 'fabduhakimov',
+                    'first_name' => 'Fayzullo',
+                    'last_name' => 'Abduhakimov',
+                    'language_code' => 'ru',
+                ],
+                'chat' => ['id' => $chatId, 'type' => 'private'],
+                'date' => time(),
+                'text' => "/start {$token}",
+            ],
+        ];
+
+        $response = $this->postJson(route('telegram.webhook'), $update);
+        $response->assertOk()->assertJsonPath('ok', true);
+
+        // Verify linkTelegramBooking API was called
+        Http::assertSent(function ($request) use ($chatId, $token) {
+            return str_contains($request->url(), "/telegram/{$chatId}/bookings")
+                && $request->method() === 'POST'
+                && ($request['token'] ?? '') === $token
+                && ($request['username'] ?? '') === 'fabduhakimov';
+        });
+
+        // Verify photo pass was sent
+        Http::assertSent(function ($request) {
+            return str_contains($request->url(), 'sendPhoto');
+        });
+    }
+
+    public function test_webhook_handles_mybookings_command_with_active_bookings(): void
+    {
+        $chatId = 88776655;
+
+        Http::fake([
+            "*/telegram/{$chatId}/bookings*" => Http::response([
+                'success' => true,
+                'count' => 2,
+                'data' => [
+                    [
+                        'type' => 'visit',
+                        'token' => 'tok_visit_1',
+                        'ref' => 'tok_visit_1',
+                        'name' => 'John Doe',
+                        'date_formatted' => '26 September 2026',
+                        'time' => '14:00',
+                        'status' => 'confirmed',
+                    ],
+                    [
+                        'type' => 'programme',
+                        'token' => 'tok_prog_2',
+                        'ref' => 'tok_prog_2',
+                        'name' => 'John Doe',
+                        'date_formatted' => '28 September 2026',
+                        'time' => '',
+                        'event_title' => 'Contemporary Art Masterclass',
+                        'status' => 'confirmed',
+                    ],
+                ],
+            ], 200),
+            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
+        ]);
+
+        config(['telegram.bot_token' => 'fake_bot_token']);
+
+        $update = [
+            'update_id' => 5002,
+            'message' => [
+                'message_id' => 502,
+                'from' => [
+                    'id' => $chatId,
+                    'first_name' => 'John',
+                    'language_code' => 'en',
+                ],
+                'chat' => ['id' => $chatId, 'type' => 'private'],
+                'date' => time(),
+                'text' => '/mybookings',
+            ],
+        ];
+
+        $response = $this->postJson(route('telegram.webhook'), $update);
+        $response->assertOk()->assertJsonPath('ok', true);
+
+        Http::assertSent(function ($request) use ($chatId) {
+            if (str_contains($request->url(), 'sendMessage')) {
+                $text = (string) ($request['text'] ?? '');
+                $replyMarkup = (string) ($request['reply_markup'] ?? '');
+
+                return $request['chat_id'] == $chatId
+                    && str_contains($text, 'My Bookings')
+                    && str_contains($text, 'tok_visit_1')
+                    && str_contains($text, 'Contemporary Art Masterclass')
+                    && str_contains($replyMarkup, 'view:tok_visit_1')
+                    && str_contains($replyMarkup, 'view:tok_prog_2');
+            }
+
+            return false;
+        });
+    }
+
+    public function test_webhook_handles_mybookings_command_when_no_active_bookings(): void
+    {
+        $chatId = 88776656;
+
+        Http::fake([
+            "*/telegram/{$chatId}/bookings*" => Http::response([
+                'success' => true,
+                'count' => 0,
+                'data' => [],
+            ], 200),
+            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
+        ]);
+
+        config(['telegram.bot_token' => 'fake_bot_token']);
+
+        $update = [
+            'update_id' => 5003,
+            'message' => [
+                'message_id' => 503,
+                'from' => [
+                    'id' => $chatId,
+                    'first_name' => 'Alice',
+                    'language_code' => 'ru',
+                ],
+                'chat' => ['id' => $chatId, 'type' => 'private'],
+                'date' => time(),
+                'text' => '📋 Мои бронирования',
+            ],
+        ];
+
+        $response = $this->postJson(route('telegram.webhook'), $update);
+        $response->assertOk()->assertJsonPath('ok', true);
+
+        Http::assertSent(function ($request) use ($chatId) {
+            if (str_contains($request->url(), 'sendMessage')) {
+                $text = (string) ($request['text'] ?? '');
+
+                return $request['chat_id'] == $chatId
+                    && str_contains($text, 'Мои бронирования')
+                    && str_contains($text, 'У вас пока нет активных бронирований');
+            }
+
+            return false;
+        });
+    }
+
+    public function test_webhook_handles_start_without_token_shows_bookings_if_user_has_bookings(): void
+    {
+        $chatId = 88776657;
+
+        Http::fake([
+            "*/telegram/{$chatId}/bookings*" => Http::response([
+                'success' => true,
+                'count' => 1,
+                'data' => [
+                    [
+                        'type' => 'visit',
+                        'token' => 'tok_visit_active',
+                        'ref' => 'tok_visit_active',
+                        'name' => 'Alice',
+                        'date_formatted' => '27 September 2026',
+                        'time' => '10:00',
+                        'status' => 'confirmed',
+                    ],
+                ],
+            ], 200),
+            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
+        ]);
+
+        config(['telegram.bot_token' => 'fake_bot_token']);
+
+        $update = [
+            'update_id' => 5004,
+            'message' => [
+                'message_id' => 504,
+                'from' => [
+                    'id' => $chatId,
+                    'first_name' => 'Alice',
+                    'language_code' => 'uz',
+                ],
+                'chat' => ['id' => $chatId, 'type' => 'private'],
+                'date' => time(),
+                'text' => '/start',
+            ],
+        ];
+
+        $response = $this->postJson(route('telegram.webhook'), $update);
+        $response->assertOk()->assertJsonPath('ok', true);
+
+        Http::assertSent(function ($request) use ($chatId) {
+            if (str_contains($request->url(), 'sendMessage')) {
+                $text = (string) ($request['text'] ?? '');
+                $replyMarkup = (string) ($request['reply_markup'] ?? '');
+
+                return $request['chat_id'] == $chatId
+                    && str_contains($text, 'Mening bandliklarim')
+                    && str_contains($text, 'tok_visit_active')
+                    && str_contains($replyMarkup, 'view:tok_visit_active');
+            }
+
+            return false;
+        });
+    }
+
+    public function test_webhook_handles_my_bookings_callback_query(): void
+    {
+        $chatId = 88776658;
+        $queryId = 'cb_my_123';
+
+        Http::fake([
+            "*/telegram/{$chatId}/bookings*" => Http::response([
+                'success' => true,
+                'count' => 1,
+                'data' => [
+                    [
+                        'type' => 'library',
+                        'token' => 'tok_lib_active',
+                        'ref' => 'tok_lib_active',
+                        'name' => 'Bob',
+                        'date_formatted' => '29 September 2026',
+                        'time' => '14:00 - 16:00',
+                        'status' => 'confirmed',
+                    ],
+                ],
+            ], 200),
+            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
+        ]);
+
+        config(['telegram.bot_token' => 'fake_bot_token']);
+
+        $update = [
+            'update_id' => 5005,
+            'callback_query' => [
+                'id' => $queryId,
+                'from' => [
+                    'id' => $chatId,
+                    'first_name' => 'Bob',
+                    'language_code' => 'en',
+                ],
+                'message' => [
+                    'message_id' => 505,
+                    'chat' => ['id' => $chatId, 'type' => 'private'],
+                ],
+                'data' => 'my_bookings',
+            ],
+        ];
+
+        $response = $this->postJson(route('telegram.webhook'), $update);
+        $response->assertOk()->assertJsonPath('ok', true);
+
+        Http::assertSent(function ($request) use ($queryId) {
+            return str_contains($request->url(), 'answerCallbackQuery')
+                && ($request['callback_query_id'] ?? '') === $queryId;
+        });
+
+        Http::assertSent(function ($request) use ($chatId) {
+            if (str_contains($request->url(), 'sendMessage')) {
+                $text = (string) ($request['text'] ?? '');
+                $replyMarkup = (string) ($request['reply_markup'] ?? '');
+
+                return $request['chat_id'] == $chatId
+                    && str_contains($text, 'tok_lib_active')
+                    && str_contains($replyMarkup, 'view:tok_lib_active');
+            }
+
+            return false;
+        });
+    }
+
+    public function test_register_bot_commands_calls_telegram_api(): void
+    {
+        Http::fake([
+            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => true], 200),
+        ]);
+
+        config(['telegram.bot_token' => 'fake_bot_token']);
+
+        /** @var TelegramService $telegram */
+        $telegram = app(TelegramService::class);
+        $telegram->registerBotCommands();
+
+        Http::assertSent(function ($request) {
+            return str_contains($request->url(), 'setMyCommands');
+        });
+    }
+
+    public function test_webhook_handles_language_command_and_displays_options(): void
+    {
+        $chatId = 77665544;
+
+        Http::fake([
+            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
+        ]);
+
+        config(['telegram.bot_token' => 'fake_bot_token']);
+
+        $update = [
+            'update_id' => 6001,
+            'message' => [
+                'message_id' => 601,
+                'from' => ['id' => $chatId, 'first_name' => 'User'],
+                'chat' => ['id' => $chatId, 'type' => 'private'],
+                'date' => time(),
+                'text' => '/language',
+            ],
+        ];
+
+        $response = $this->postJson(route('telegram.webhook'), $update);
+        $response->assertOk()->assertJsonPath('ok', true);
+
+        Http::assertSent(function ($request) use ($chatId) {
+            if (str_contains($request->url(), 'sendMessage')) {
+                $text = (string) ($request['text'] ?? '');
+                $replyMarkup = (string) ($request['reply_markup'] ?? '');
+
+                return $request['chat_id'] == $chatId
+                    && str_contains($text, 'Choose language')
+                    && str_contains($replyMarkup, 'lang:ru')
+                    && str_contains($replyMarkup, 'lang:uz')
+                    && str_contains($replyMarkup, 'lang:en');
+            }
+
+            return false;
+        });
+    }
+
+    public function test_webhook_handles_set_language_callback(): void
+    {
+        $chatId = 77665545;
+        $queryId = 'q_set_lang_123';
+
+        Http::fake([
+            "*/telegram/{$chatId}/language" => Http::response([
+                'success' => true,
+                'message' => 'Language updated successfully.',
+            ], 200),
+            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
+        ]);
+
+        config(['telegram.bot_token' => 'fake_bot_token']);
+
+        $update = [
+            'update_id' => 6002,
+            'callback_query' => [
+                'id' => $queryId,
+                'from' => [
+                    'id' => $chatId,
+                    'first_name' => 'User',
+                    'language_code' => 'en',
+                ],
+                'message' => [
+                    'message_id' => 602,
+                    'chat' => ['id' => $chatId, 'type' => 'private'],
+                ],
+                'data' => 'lang:ru',
+            ],
+        ];
+
+        $response = $this->postJson(route('telegram.webhook'), $update);
+        $response->assertOk()->assertJsonPath('ok', true);
+
+        Http::assertSent(function ($request) use ($queryId) {
+            return str_contains($request->url(), 'answerCallbackQuery')
+                && ($request['callback_query_id'] ?? '') === $queryId
+                && str_contains((string) ($request['text'] ?? ''), 'Русский');
+        });
+
+        Http::assertSent(function ($request) use ($chatId) {
+            if (str_contains($request->url(), 'sendMessage')) {
+                $text = (string) ($request['text'] ?? '');
+
+                return $request['chat_id'] == $chatId
+                    && str_contains($text, 'Язык успешно изменён на Русский');
             }
 
             return false;

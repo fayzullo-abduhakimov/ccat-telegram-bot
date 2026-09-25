@@ -45,12 +45,12 @@ class TelegramWebhookCommand extends Command
         $result = $telegram->setWebhook($url);
 
         if ($result && ($result['ok'] ?? false)) {
-            $this->info("✅ Webhook set successfully to: {$url}");
+            $this->info("Webhook set successfully to: {$url}");
 
             return self::SUCCESS;
         }
 
-        $this->error('❌ Failed to set webhook: '.($result['description'] ?? 'Unknown error'));
+        $this->error('Failed to set webhook: '.($result['description'] ?? 'Unknown error'));
 
         return self::FAILURE;
     }
@@ -60,12 +60,12 @@ class TelegramWebhookCommand extends Command
         $result = $telegram->deleteWebhook();
 
         if ($result && ($result['ok'] ?? false)) {
-            $this->info('✅ Webhook deleted successfully. You can now use polling.');
+            $this->info('Webhook deleted successfully. You can now use polling.');
 
             return self::SUCCESS;
         }
 
-        $this->error('❌ Failed to delete webhook.');
+        $this->error('Failed to delete webhook.');
 
         return self::FAILURE;
     }

@@ -1422,4 +1422,26 @@ class TelegramBotTest extends TestCase
             return false;
         });
     }
+
+    public function test_webhook_dispatches_process_telegram_update_job(): void
+    {
+        \Illuminate\Support\Facades\Queue::fake();
+
+        $update = [
+            'update_id' => 9999,
+            'message' => [
+                'message_id' => 99,
+                'chat' => ['id' => 12345, 'type' => 'private'],
+                'text' => '/help',
+            ],
+        ];
+
+        $response = $this->postJson(route('telegram.webhook'), $update);
+
+        $response->assertOk()->assertJsonPath('ok', true);
+
+        \Illuminate\Support\Facades\Queue::assertPushed(\App\Jobs\ProcessTelegramUpdate::class, function ($job) use ($update) {
+            return $job->update === $update;
+        });
+    }
 }

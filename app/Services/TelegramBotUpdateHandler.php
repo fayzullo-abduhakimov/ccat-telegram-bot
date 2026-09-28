@@ -829,7 +829,7 @@ class TelegramBotUpdateHandler
             $title = ! empty($b['event_title']) ? " — {$b['event_title']}" : '';
             $visitor = ! empty($b['name']) ? " ({$b['name']})" : '';
 
-            $lines[] = sprintf('%d. %s <b>%s</b>%s%s', $idx + 1, $typeEmoji, $date.$time, $title, $visitor);
+            $lines[] = sprintf('%d. %s <b>%s</b>%s%s (<code>%s</code>)', $idx + 1, $typeEmoji, $date.$time, $title, $visitor, $ref);
 
             $btnLabel = sprintf('%s %s%s', $typeEmoji, $date, $time);
             $buttons[] = [

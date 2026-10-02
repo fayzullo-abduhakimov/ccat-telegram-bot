@@ -4,33 +4,21 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
-use App\Jobs\ProcessTelegramUpdate;
-use Illuminate\Http\JsonResponse;
+use App\Telegram\TelegramWebhook;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Log;
+use Illuminate\Http\Response;
+use Nutgram\Laravel\RunningMode\LaravelWebhook;
+use SergiX44\Nutgram\Nutgram;
 
 class TelegramWebhookController extends Controller
 {
-    public function handle(Request $request): JsonResponse
+    public function __invoke(Request $request, Nutgram $bot): Response
     {
-        $update = $request->all();
+        abort_unless(hash_equals(TelegramWebhook::secret(), (string) $request->header('X-Telegram-Bot-Api-Secret-Token')), 403);
 
-        if (empty($update)) {
-            return response()->json(['ok' => false, 'error' => 'Empty update payload'], 400);
-        }
+        $bot->setRunningMode(LaravelWebhook::class);
+        $bot->run();
 
-        try {
-            ProcessTelegramUpdate::dispatch($update);
-
-            return response()->json(['ok' => true]);
-        } catch (\Throwable $e) {
-            Log::error('Telegram webhook dispatch exception: '.$e->getMessage(), [
-                'update' => $update,
-                'trace' => $e->getTraceAsString(),
-            ]);
-
-            // Still return 200 to Telegram so it doesn't repeatedly retry
-            return response()->json(['ok' => true, 'warning' => 'Dispatched with errors']);
-        }
+        return response()->noContent();
     }
 }

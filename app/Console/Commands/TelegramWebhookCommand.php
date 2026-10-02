@@ -4,94 +4,39 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
-use App\Services\TelegramService;
+use App\Telegram\TelegramWebhook;
 use Illuminate\Console\Command;
+use SergiX44\Nutgram\Nutgram;
+use Throwable;
 
-class TelegramWebhookCommand extends Command
+final class TelegramWebhookCommand extends Command
 {
-    protected $signature = 'telegram:webhook 
-                            {action=info : Action to perform (info, set, delete)}
-                            {--url= : Webhook URL for set action}';
+    protected $signature = 'telegram:webhook';
 
-    protected $description = 'Manage Telegram Bot webhook';
+    protected $description = 'Register the Telegram bot webhook and menu commands';
 
-    public function handle(TelegramService $telegram): int
+    public function handle(Nutgram $bot): int
     {
-        if (! $telegram->isConfigured()) {
-            $this->error('TELEGRAM_BOT_TOKEN is not configured in .env.');
-
-            return self::FAILURE;
-        }
-
-        $action = $this->argument('action');
-
-        return match ($action) {
-            'set' => $this->setWebhook($telegram),
-            'delete' => $this->deleteWebhook($telegram),
-            default => $this->showInfo($telegram),
-        };
-    }
-
-    private function setWebhook(TelegramService $telegram): int
-    {
-        $url = (string) $this->option('url');
-
-        if (empty($url)) {
-            $this->error('Please provide a URL using --url=https://your-domain.com/api/telegram/webhook');
-
-            return self::FAILURE;
-        }
-
-        $result = $telegram->setWebhook($url);
-
-        if ($result && ($result['ok'] ?? false)) {
-            $this->info("Webhook set successfully to: {$url}");
+        if (blank(config('nutgram.token'))) {
+            $this->warn('TELEGRAM_BOT_TOKEN is not set; the bot is left as it is.');
 
             return self::SUCCESS;
         }
 
-        $this->error('Failed to set webhook: '.($result['description'] ?? 'Unknown error'));
-
-        return self::FAILURE;
-    }
-
-    private function deleteWebhook(TelegramService $telegram): int
-    {
-        $result = $telegram->deleteWebhook();
-
-        if ($result && ($result['ok'] ?? false)) {
-            $this->info('Webhook deleted successfully. You can now use polling.');
-
-            return self::SUCCESS;
-        }
-
-        $this->error('Failed to delete webhook.');
-
-        return self::FAILURE;
-    }
-
-    private function showInfo(TelegramService $telegram): int
-    {
-        $info = $telegram->getWebhookInfo();
-
-        if (! $info || ! ($info['ok'] ?? false)) {
-            $this->error('Failed to get webhook info.');
+        try {
+            $bot->setWebhook(
+                url: TelegramWebhook::url(),
+                allowed_updates: ['message', 'callback_query'],
+                secret_token: TelegramWebhook::secret(),
+            );
+            $bot->registerMyCommands();
+        } catch (Throwable $exception) {
+            $this->error('Telegram refused the webhook: '.$exception->getMessage());
 
             return self::FAILURE;
         }
 
-        $data = $info['result'];
-        $this->info('Telegram Webhook Info:');
-        $this->table(
-            ['Property', 'Value'],
-            [
-                ['URL', $data['url'] ?: '(None - Polling Mode)'],
-                ['Custom Certificate', $data['has_custom_certificate'] ? 'Yes' : 'No'],
-                ['Pending Updates', $data['pending_update_count'] ?? 0],
-                ['Last Error Date', isset($data['last_error_date']) ? date('Y-m-d H:i:s', $data['last_error_date']) : 'None'],
-                ['Last Error Message', $data['last_error_message'] ?? 'None'],
-            ]
-        );
+        $this->info('Telegram delivers updates to '.TelegramWebhook::url());
 
         return self::SUCCESS;
     }

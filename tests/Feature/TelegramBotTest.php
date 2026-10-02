@@ -4,1444 +4,734 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
-use App\Services\TelegramService;
-use Illuminate\Support\Facades\Http;
+use App\Enums\BookingStatus;
+use App\Events\BookingRequested;
+use App\Models\LibraryBooking;
+use App\Models\LibrarySlot;
+use App\Models\Programme;
+use App\Models\ProgrammeBooking;
+use App\Models\TelegramUser;
+use App\Models\VisitBooking;
+use App\Models\VisitSlot;
+use App\Telegram\Support\BookingCard;
+use App\Telegram\TelegramWebhook;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Event;
+use SergiX44\Nutgram\Nutgram;
+use SergiX44\Nutgram\Telegram\Properties\ChatType;
+use SergiX44\Nutgram\Telegram\Types\Chat\Chat;
+use SergiX44\Nutgram\Telegram\Types\User\User;
+use SergiX44\Nutgram\Testing\FakeNutgram;
 use Tests\TestCase;
 
 class TelegramBotTest extends TestCase
 {
-    public function test_service_health_dashboard_returns_active_status(): void
-    {
-        $response = $this->get('/');
+    use RefreshDatabase;
 
-        $response->assertOk()
-            ->assertJsonPath('status', 'active')
-            ->assertJsonPath('bot_username', 'ccat_booking_bot');
+    private const CHAT = 111222333;
+
+    private function bot(string $language = 'ru', ChatType $type = ChatType::PRIVATE): FakeNutgram
+    {
+        /** @var FakeNutgram $bot */
+        $bot = app(Nutgram::class);
+
+        return $bot
+            ->setCommonUser(User::make(self::CHAT, false, 'Dilshod', language_code: $language))
+            ->setCommonChat(Chat::make(self::CHAT, $type));
     }
 
-    public function test_webhook_endpoint_handles_start_with_booking_token(): void
+    private function visitor(?string $phone = '998901234567', string $language = 'ru'): TelegramUser
     {
-        $token = 'test_token_1234567890abcdef1234567890abcdef1234567890abcdef1234567890';
-        $chatId = 12345678;
+        return TelegramUser::query()->create(['chat_id' => self::CHAT, 'phone' => $phone, 'language_code' => $language]);
+    }
 
-        Http::fake([
-            "*/booking/{$token}" => Http::response([
-                'success' => true,
-                'data' => [
-                    'type' => 'visit',
-                    'badge' => 'Visit Pass',
-                    'token' => $token,
-                    'name' => 'Alisher Navoiy',
-                    'first_name' => 'Alisher',
-                    'last_name' => 'Navoiy',
-                    'date' => '2026-09-18',
-                    'date_formatted' => '18 September 2026',
-                    'time' => '10:00',
-                    'building' => 'Building B, 6 Amir Temur str., Tashkent',
-                    'status' => 'pending',
-                    'status_label' => 'Pending',
-                    'qr_png_base64' => base64_encode('fake-png-bytes'),
-                ],
-            ], 200),
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
+    private function visit(string $phone = '+998 90 123 45 67', BookingStatus $status = BookingStatus::Confirmed, int $inDays = 3): VisitBooking
+    {
+        return VisitBooking::query()->create([
+            'first_name' => 'Dilshod',
+            'last_name' => 'Karimov',
+            'email' => 'dilshod@example.com',
+            'phone' => $phone,
+            'position' => 'artist',
+            'date' => Carbon::today()->addDays($inDays)->toDateString(),
+            'time' => '11:00',
+            'status' => $status,
+        ]);
+    }
+
+    private function registration(BookingStatus $status, string $title = 'Public Talk'): ProgrammeBooking
+    {
+        $programme = Programme::query()->create([
+            'title' => ['en' => $title, 'ru' => $title, 'uz' => $title],
+            'slug' => 'talk-'.uniqid(),
+            'quote_author' => ['en' => 'Author', 'ru' => 'Автор', 'uz' => 'Muallif'],
+            'status' => true,
+            'has_registration' => true,
+            'date_start' => Carbon::today()->addDays(5)->setTime(18, 0),
+            'date_end' => Carbon::today()->addDays(5)->setTime(20, 0),
         ]);
 
-        config(['telegram.bot_token' => 'fake_bot_token']);
+        return ProgrammeBooking::query()->create([
+            'programme_id' => $programme->id,
+            'first_name' => 'Dilshod',
+            'last_name' => 'Karimov',
+            'email' => 'dilshod@example.com',
+            'phone' => '90 123 45 67',
+            'position' => 'artist',
+            'status' => $status,
+        ]);
+    }
 
+    /**
+     * @return list<array{method: string, data: array<string, mixed>}>
+     */
+    private function sent(FakeNutgram $bot): array
+    {
+        return array_values(array_map(function (array $call): array {
+            [$request] = array_values($call);
+
+            return ['method' => $request->getUri()->getPath(), 'data' => FakeNutgram::getActualData($request)];
+        }, $bot->getRequestHistory()));
+    }
+
+    /** @return list<string> */
+    private function texts(FakeNutgram $bot): array
+    {
+        return array_values(array_filter(array_map(fn (array $call): ?string => $call['data']['text'] ?? null, $this->sent($bot))));
+    }
+
+    /** @return list<string> */
+    private function methods(FakeNutgram $bot): array
+    {
+        return array_column($this->sent($bot), 'method');
+    }
+
+    private function librarySlot(int $inDays, string $startsAt, int $capacity = 20): LibrarySlot
+    {
+        return LibrarySlot::query()->create([
+            'date' => Carbon::today()->addDays($inDays)->toDateString(),
+            'starts_at' => $startsAt,
+            'ends_at' => Carbon::parse($startsAt)->addHour()->format('H:i'),
+            'capacity' => $capacity,
+            'status' => true,
+        ]);
+    }
+
+    private function visitSlot(int $inDays, string $time, int $capacity = 20): VisitSlot
+    {
+        return VisitSlot::query()->create([
+            'date' => Carbon::today()->addDays($inDays)->toDateString(),
+            'time' => $time,
+            'capacity' => $capacity,
+            'status' => true,
+        ]);
+    }
+
+    private function libraryBooking(LibrarySlot $slot, string $endsAt, string $phone = '+998 90 123 45 67'): LibraryBooking
+    {
+        return LibraryBooking::query()->create([
+            'first_name' => 'Dilshod',
+            'last_name' => 'Karimov',
+            'email' => 'dilshod@example.com',
+            'phone' => $phone,
+            'position' => 'researcher',
+            'purpose' => 'Archive',
+            'library_slot_id' => $slot->id,
+            'date' => $slot->date->toDateString(),
+            'starts_at' => $slot->starts_at,
+            'ends_at' => $endsAt,
+            'status' => BookingStatus::Confirmed,
+        ]);
+    }
+
+    private function bookedVisit(VisitSlot $slot, string $phone = '+998 90 123 45 67'): VisitBooking
+    {
+        return VisitBooking::query()->create([
+            'first_name' => 'Dilshod',
+            'last_name' => 'Karimov',
+            'email' => 'dilshod@example.com',
+            'phone' => $phone,
+            'position' => 'artist',
+            'visit_slot_id' => $slot->id,
+            'date' => $slot->date->toDateString(),
+            'time' => $slot->time,
+            'status' => BookingStatus::Confirmed,
+        ]);
+    }
+
+    /**
+     * @return Collection<int, string>
+     */
+    private function buttons(FakeNutgram $bot, string $field = 'callback_data'): Collection
+    {
+        $call = collect($this->sent($bot))->last(fn (array $call): bool => isset($call['data']['reply_markup']['inline_keyboard']));
+
+        return collect($call['data']['reply_markup']['inline_keyboard'] ?? [])->flatten(1)->pluck($field);
+    }
+
+    /** @return list<string> */
+    private function alerts(FakeNutgram $bot): array
+    {
+        return array_values(array_filter(array_map(
+            fn (array $call): ?string => $call['method'] === 'answerCallbackQuery' ? ($call['data']['text'] ?? null) : null,
+            $this->sent($bot),
+        )));
+    }
+
+    public function test_start_greets_in_the_visitors_language_and_asks_for_their_number(): void
+    {
+        $bot = $this->bot('uz');
+        $bot->hearText('/start')->reply();
+
+        [$welcome, $askPhone] = $this->texts($bot);
+        $this->assertStringStartsWith(__('app.bot.welcome', [], 'uz'), $welcome);
+        $this->assertStringContainsString(__('app.bot.welcome', [], 'ru'), $welcome);
+        $this->assertStringContainsString(__('app.bot.welcome', [], 'en'), $welcome);
+        $this->assertSame(__('app.bot.ask_phone', [], 'uz'), $askPhone);
+        $this->assertTrue($this->sent($bot)[1]['data']['reply_markup']['keyboard'][0][0]['request_contact']);
+        $this->assertSame('uz', TelegramUser::query()->where('chat_id', self::CHAT)->sole()->language_code);
+    }
+
+    public function test_a_regional_telegram_language_picks_the_site_language(): void
+    {
+        $this->bot('en-GB')->hearText('/start')->reply();
+
+        $this->assertSame('en', TelegramUser::query()->where('chat_id', self::CHAT)->sole()->language_code);
+    }
+
+    public function test_the_old_start_links_with_a_code_still_open_the_bot(): void
+    {
+        $bot = $this->bot();
+        $bot->hearText('/start 7d8e9f')->reply();
+
+        $this->assertStringStartsWith(__('app.bot.welcome', [], 'ru'), $this->texts($bot)[0]);
+    }
+
+    public function test_help_shows_what_the_bot_can_do(): void
+    {
+        $bot = $this->bot();
+        $bot->hearText('/help')->reply();
+
+        $this->assertStringStartsWith(__('app.bot.welcome', [], 'ru'), $this->texts($bot)[0]);
+    }
+
+    public function test_the_menu_buttons_work_in_every_language(): void
+    {
+        $this->visitor();
+        $this->visit();
+
+        foreach (['uz', 'ru', 'en'] as $language) {
+            $bot = $this->bot();
+            $bot->hearText(__('app.bot.menu_bookings', [], $language))->reply();
+
+            $this->assertSame(__('app.bot.bookings_heading', [], 'ru'), $this->texts($bot)[0], "The {$language} menu button did nothing.");
+        }
+
+        $bot->hearText('/mybookings')->reply();
+
+        $this->assertSame(__('app.bot.bookings_heading', [], 'ru'), $this->texts($bot)[0]);
+    }
+
+    public function test_sharing_their_own_number_shows_their_bookings(): void
+    {
+        $booking = $this->visit('90 123-45-67');
+
+        $bot = $this->bot();
+        $bot->hearMessage(['contact' => ['phone_number' => '+998901234567', 'first_name' => 'Dilshod', 'user_id' => self::CHAT]])->reply();
+
+        $this->assertSame('998901234567', TelegramUser::query()->where('chat_id', self::CHAT)->sole()->phone);
+
+        $texts = $this->texts($bot);
+        $this->assertSame(__('app.bot.phone_saved', ['phone' => '998901234567'], 'ru'), $texts[0]);
+        $this->assertSame(__('app.bot.bookings_heading', [], 'ru'), $texts[1]);
+        $this->assertStringStartsWith('<b>'.__('app.bot.type_visit', [], 'ru').'</b>', $texts[2]);
+        $this->assertStringContainsString(__('app.bot.type_visit', [], 'uz'), $texts[2]);
+        $this->assertStringContainsString(__('app.bot.type_visit', [], 'en'), $texts[2]);
+        $this->assertStringContainsString('Dilshod Karimov', $texts[2]);
+        $this->assertSame(__('app.bot.menu_bookings', [], 'ru'), $this->sent($bot)[0]['data']['reply_markup']['keyboard'][0][0]['text']);
+
+        $buttons = collect($this->sent($bot)[2]['data']['reply_markup']['inline_keyboard'])->flatten(1)->pluck('callback_data');
+        $this->assertContains("qr:visit:{$booking->id}", $buttons);
+        $this->assertContains("cancel:visit:{$booking->id}", $buttons);
+    }
+
+    public function test_a_contact_card_of_somebody_else_is_refused(): void
+    {
+        $this->visit();
+
+        $bot = $this->bot();
+        $bot->hearMessage(['contact' => ['phone_number' => '+998901234567', 'first_name' => 'Someone', 'user_id' => 999]])->reply();
+
+        $this->assertSame([__('app.bot.not_own_contact', [], 'ru')], $this->texts($bot));
+        $this->assertNull(TelegramUser::query()->where('chat_id', self::CHAT)->sole()->phone);
+    }
+
+    public function test_a_number_belongs_to_the_account_that_shared_it_last(): void
+    {
+        TelegramUser::query()->create(['chat_id' => 5, 'phone' => '998901234567']);
+
+        $this->bot()->hearMessage(['contact' => ['phone_number' => '998901234567', 'first_name' => 'Dilshod', 'user_id' => self::CHAT]])->reply();
+
+        $this->assertNull(TelegramUser::query()->where('chat_id', 5)->sole()->phone);
+        $this->assertSame('998901234567', TelegramUser::query()->where('chat_id', self::CHAT)->sole()->phone);
+    }
+
+    public function test_bookings_made_with_another_number_stay_hidden(): void
+    {
+        $this->visitor();
+        $this->visit('+998 91 111 11 11');
+
+        $bot = $this->bot();
+        $bot->hearText('/mybookings')->reply();
+
+        $this->assertSame([__('app.bot.no_bookings', ['phone' => '998901234567'], 'ru')], $this->texts($bot));
+    }
+
+    public function test_the_bookings_list_asks_for_the_number_when_it_is_unknown(): void
+    {
+        $this->visitor(phone: null);
+
+        $bot = $this->bot();
+        $bot->hearText('/mybookings')->reply();
+
+        $this->assertSame([__('app.bot.ask_phone', [], 'ru')], $this->texts($bot));
+    }
+
+    public function test_history_lists_past_and_cancelled_bookings(): void
+    {
+        $this->visitor();
+        $this->visit(status: BookingStatus::Cancelled);
+        $this->visit(inDays: -2);
+        $this->visit();
+
+        $bot = $this->bot();
+        $bot->hearText('/history')->reply();
+
+        $text = $this->texts($bot)[0];
+        $this->assertStringStartsWith(__('app.bot.history_heading', [], 'ru'), $text);
+        $this->assertSame(2, substr_count($text, '•'));
+        $this->assertStringContainsString(BookingStatus::Cancelled->getLabel(), $text);
+    }
+
+    public function test_the_qr_code_is_sent_for_a_confirmed_booking(): void
+    {
+        $this->visitor();
+        $booking = $this->visit();
+
+        $bot = $this->bot();
+        $bot->hearCallbackQueryData("qr:visit:{$booking->id}")->reply();
+
+        $this->assertSame(['answerCallbackQuery', 'sendPhoto'], $this->methods($bot));
+    }
+
+    public function test_the_bot_offers_no_pdf_pass(): void
+    {
+        $this->visitor();
+        $this->visit();
+
+        $bot = $this->bot();
+        $bot->hearText('/mybookings')->reply();
+
+        $buttons = collect($this->sent($bot)[1]['data']['reply_markup']['inline_keyboard'])->flatten(1)->pluck('callback_data');
+        $this->assertCount(3, $buttons);
+        $this->assertSame([], $buttons->filter(fn (string $data): bool => str_starts_with($data, 'pass:'))->all());
+    }
+
+    public function test_a_request_awaiting_approval_has_no_pass(): void
+    {
+        $this->visitor();
+        $request = $this->registration(BookingStatus::Pending);
+
+        $bot = $this->bot();
+        $bot->hearText('/mybookings')->reply();
+
+        $card = $this->sent($bot)[1]['data'];
+        $this->assertStringContainsString(__('app.bot.pending_note', [], 'ru'), $card['text']);
+        $this->assertNotContains("qr:programme:{$request->id}", collect($card['reply_markup']['inline_keyboard'])->flatten(1)->pluck('callback_data'));
+
+        $bot->hearCallbackQueryData("qr:programme:{$request->id}")->reply();
+
+        $this->assertNotContains('sendPhoto', $this->methods($bot));
+    }
+
+    public function test_buttons_cannot_reach_somebody_elses_booking(): void
+    {
+        $this->visitor();
+        $stranger = $this->visit('+998 93 000 00 00');
+
+        $bot = $this->bot();
+        $bot->hearCallbackQueryData("qr:visit:{$stranger->id}")->reply();
+
+        $this->assertSame(['answerCallbackQuery'], $this->methods($bot));
+        $this->assertSame(__('app.bot.not_found', [], 'ru'), $this->sent($bot)[0]['data']['text']);
+
+        $bot->hearCallbackQueryData("cancel-yes:visit:{$stranger->id}")->reply();
+
+        $this->assertSame(['answerCallbackQuery'], $this->methods($bot));
+        $this->assertSame(BookingStatus::Confirmed, $stranger->fresh()->status);
+    }
+
+    public function test_cancelling_asks_first_and_then_frees_the_place(): void
+    {
+        $this->visitor();
+        $booking = $this->visit();
+
+        $bot = $this->bot();
+        $bot->hearCallbackQueryData("cancel:visit:{$booking->id}")->reply();
+
+        $this->assertStringContainsString(__('app.bot.cancel_question', [], 'ru'), $this->texts($bot)[0]);
+        $this->assertSame(BookingStatus::Confirmed, $booking->fresh()->status);
+
+        $bot->hearCallbackQueryData("cancel-yes:visit:{$booking->id}")->reply();
+
+        $this->assertSame(BookingStatus::Cancelled, $booking->fresh()->status);
+        $this->assertNotNull($booking->fresh()->cancelled_at);
+        $this->assertStringContainsString(__('app.bot.cancelled', [], 'ru'), $this->texts($bot)[array_key_last($this->texts($bot))]);
+    }
+
+    public function test_keeping_the_booking_leaves_it_as_it_was(): void
+    {
+        $this->visitor();
+        $booking = $this->visit();
+
+        $bot = $this->bot();
+        $bot->hearCallbackQueryData("cancel-no:visit:{$booking->id}")->reply();
+
+        $this->assertSame(BookingStatus::Confirmed, $booking->fresh()->status);
+    }
+
+    public function test_a_visit_that_has_happened_cannot_be_cancelled(): void
+    {
+        $this->visitor();
+        $verified = $this->visit(status: BookingStatus::Verified);
+        $library = LibraryBooking::query()->create([
+            'first_name' => 'Dilshod',
+            'last_name' => 'Karimov',
+            'email' => 'dilshod@example.com',
+            'phone' => '+998901234567',
+            'position' => 'researcher',
+            'purpose' => 'Archive',
+            'date' => Carbon::today()->subDay()->toDateString(),
+            'starts_at' => '10:00',
+            'ends_at' => '11:00',
+            'status' => BookingStatus::Confirmed,
+        ]);
+
+        $bot = $this->bot();
+
+        foreach (["visit:{$verified->id}", "library:{$library->id}"] as $reference) {
+            $bot->hearCallbackQueryData("cancel-yes:{$reference}")->reply();
+
+            $this->assertSame(__('app.bot.cancel_too_late', [], 'ru'), $this->sent($bot)[0]['data']['text']);
+        }
+
+        $this->assertSame(BookingStatus::Verified, $verified->fresh()->status);
+        $this->assertSame(BookingStatus::Confirmed, $library->fresh()->status);
+    }
+
+    public function test_visits_and_library_bookings_can_be_moved_but_programme_registrations_cannot(): void
+    {
+        $this->visitor();
+        $visit = $this->visit();
+        $library = $this->libraryBooking($this->librarySlot(2, '10:00'), '12:00');
+        $registration = $this->registration(BookingStatus::Confirmed);
+
+        $bot = $this->bot();
+        $bot->hearText('/mybookings')->reply();
+
+        $buttons = collect($this->sent($bot))->flatMap(fn (array $call): array => collect($call['data']['reply_markup']['inline_keyboard'] ?? [])->flatten(1)->pluck('callback_data')->all());
+
+        $this->assertContains("move:visit:{$visit->id}", $buttons);
+        $this->assertContains("move:library:{$library->id}", $buttons);
+        $this->assertNotContains("move:programme:{$registration->id}", $buttons);
+        $this->assertContains("cancel:programme:{$registration->id}", $buttons);
+
+        $bot->hearCallbackQueryData("move:programme:{$registration->id}")->reply();
+
+        $this->assertSame([__('app.bot.move_closed', [], 'ru')], $this->alerts($bot));
+    }
+
+    public function test_a_library_booking_moves_to_another_day_keeps_its_length_and_the_new_pass_is_emailed(): void
+    {
+        Event::fake([BookingRequested::class]);
+        $this->visitor();
+        $booking = $this->libraryBooking($this->librarySlot(2, '10:00'), '12:00');
+        $later = $this->librarySlot(5, '14:00');
+        $full = $this->librarySlot(5, '16:00', capacity: 1);
+        $this->libraryBooking($full, '17:00', phone: '+998 93 000 00 00');
+        $newDay = $later->date->toDateString();
+
+        $bot = $this->bot();
+        $bot->hearCallbackQueryData("move:library:{$booking->id}")->reply();
+
+        $this->assertStringEndsWith(__('app.bot.move_choose_day', [], 'ru'), $this->texts($bot)[0]);
+        $this->assertContains("move-day:library:{$booking->id}:{$newDay}", $this->buttons($bot));
+        $this->assertContains("move-no:library:{$booking->id}", $this->buttons($bot));
+
+        $bot->hearCallbackQueryData("move-day:library:{$booking->id}:{$newDay}")->reply();
+
+        $this->assertStringEndsWith(__('app.bot.move_choose_time', ['date' => BookingCard::day($later->date, 'dddd, D MMMM', 'ru')], 'ru'), $this->texts($bot)[0]);
+        $this->assertContains("move-to:library:{$booking->id}:{$later->id}", $this->buttons($bot));
+        $this->assertNotContains("move-to:library:{$booking->id}:{$full->id}", $this->buttons($bot));
+        $this->assertContains('14:00 – 16:00', $this->buttons($bot, 'text'));
+        $this->assertStringNotContainsString('PM', $this->buttons($bot, 'text')->implode(' '));
+
+        $bot->hearCallbackQueryData("move-to:library:{$booking->id}:{$later->id}")->reply();
+
+        $booking->refresh();
+        $this->assertSame($newDay, $booking->date->toDateString());
+        $this->assertSame('14:00', $booking->starts_at);
+        $this->assertSame('16:00', $booking->ends_at);
+        $this->assertSame($later->id, $booking->library_slot_id);
+        $this->assertSame(BookingStatus::Confirmed, $booking->status);
+        $this->assertSame([__('app.bot.moved', [], 'ru')], $this->alerts($bot));
+        $this->assertStringContainsString('14:00 – 16:00', $this->texts($bot)[1]);
+        $this->assertContains("qr:library:{$booking->id}", $this->buttons($bot));
+
+        Event::assertDispatchedTimes(BookingRequested::class, 1);
+        Event::assertDispatched(BookingRequested::class, fn (BookingRequested $event): bool => $event->booking->is($booking));
+    }
+
+    public function test_a_visit_moves_to_another_time_on_the_same_day(): void
+    {
+        Event::fake([BookingRequested::class]);
+        $this->visitor();
+        $booking = $this->bookedVisit($this->visitSlot(3, '11:00'));
+        $afternoon = $this->visitSlot(3, '15:00');
+
+        $bot = $this->bot();
+        $bot->hearCallbackQueryData("move-day:visit:{$booking->id}:{$afternoon->date->toDateString()}")->reply();
+
+        $this->assertSame(['15:00', __('app.bot.move_other_day', [], 'ru'), __('app.bot.move_back', [], 'ru')], $this->buttons($bot, 'text')->all());
+
+        $bot->hearCallbackQueryData("move-to:visit:{$booking->id}:{$afternoon->id}")->reply();
+
+        $this->assertSame('15:00', $booking->fresh()->time);
+        $this->assertSame($afternoon->id, $booking->fresh()->visit_slot_id);
+        Event::assertDispatched(BookingRequested::class);
+    }
+
+    public function test_a_taken_time_is_refused_and_the_booking_stays(): void
+    {
+        Event::fake([BookingRequested::class]);
+        $this->visitor();
+        $slot = $this->visitSlot(3, '11:00');
+        $booking = $this->bookedVisit($slot);
+        $full = $this->visitSlot(4, '12:00', capacity: 1);
+        $this->bookedVisit($full, phone: '+998 93 000 00 00');
+
+        $bot = $this->bot();
+        $bot->hearCallbackQueryData("move-to:visit:{$booking->id}:{$full->id}")->reply();
+
+        $this->assertSame([__('app.bot.move_taken', [], 'ru')], $this->alerts($bot));
+        $this->assertSame($slot->id, $booking->fresh()->visit_slot_id);
+        Event::assertNotDispatched(BookingRequested::class);
+    }
+
+    public function test_a_day_the_visitor_already_has_a_booking_on_is_not_offered(): void
+    {
+        $this->visitor();
+        $booking = $this->bookedVisit($this->visitSlot(3, '11:00'));
+        $taken = $this->bookedVisit($this->visitSlot(5, '11:00'));
+        $sameDay = $this->visitSlot(5, '16:00');
+        $free = $this->visitSlot(6, '11:00');
+
+        $bot = $this->bot();
+        $bot->hearCallbackQueryData("move:visit:{$booking->id}")->reply();
+
+        $this->assertContains("move-day:visit:{$booking->id}:{$free->date->toDateString()}", $this->buttons($bot));
+        $this->assertNotContains("move-day:visit:{$booking->id}:{$sameDay->date->toDateString()}", $this->buttons($bot));
+
+        $bot->hearCallbackQueryData("move-to:visit:{$booking->id}:{$sameDay->id}")->reply();
+
+        $this->assertSame([__('app.booking.error.daily_limit', ['limit' => 1], 'ru')], $this->alerts($bot));
+        $this->assertSame(3, (int) Carbon::today()->diffInDays($booking->fresh()->date));
+        $this->assertSame(BookingStatus::Confirmed, $taken->fresh()->status);
+    }
+
+    public function test_a_late_library_move_still_ends_before_midnight(): void
+    {
+        $this->visitor();
+        $booking = $this->libraryBooking($this->librarySlot(2, '10:00'), '18:00');
+        $evening = $this->librarySlot(4, '20:00');
+
+        $this->bot()->hearCallbackQueryData("move-to:library:{$booking->id}:{$evening->id}")->reply();
+
+        $this->assertSame('20:00', $booking->fresh()->starts_at);
+        $this->assertSame('23:00', $booking->fresh()->ends_at);
+    }
+
+    public function test_the_days_to_move_to_are_offered_soonest_first(): void
+    {
+        $this->visitor();
+        $booking = $this->bookedVisit($this->visitSlot(2, '11:00'));
+        $this->visitSlot(9, '11:00');
+        $this->visitSlot(4, '11:00');
+        $this->visitSlot(1, '11:00');
+
+        $bot = $this->bot();
+        $bot->hearCallbackQueryData("move:visit:{$booking->id}")->reply();
+
+        $days = $this->buttons($bot)->filter(fn (string $data): bool => str_starts_with($data, 'move-day:'))
+            ->map(fn (string $data): string => substr($data, -10))
+            ->values()
+            ->all();
+
+        $this->assertSame([1, 4, 9], array_map(fn (string $day): int => (int) Carbon::today()->diffInDays(Carbon::parse($day)), $days));
+    }
+
+    public function test_an_old_library_booking_that_ran_past_midnight_keeps_its_length_when_moved(): void
+    {
+        $this->visitor();
+        $booking = $this->libraryBooking($this->librarySlot(2, '16:00'), '00:00');
+        $morning = $this->librarySlot(3, '10:00');
+
+        $this->assertSame(8, $booking->duration_hours);
+
+        $this->bot()->hearCallbackQueryData("move-to:library:{$booking->id}:{$morning->id}")->reply();
+
+        $this->assertSame('10:00', $booking->fresh()->starts_at);
+        $this->assertSame('18:00', $booking->fresh()->ends_at);
+    }
+
+    public function test_a_booking_cannot_be_moved_back_and_forth_without_end(): void
+    {
+        Event::fake([BookingRequested::class]);
+        $this->visitor();
+        $first = $this->visitSlot(3, '11:00');
+        $second = $this->visitSlot(3, '15:00');
+        $booking = $this->bookedVisit($first);
+
+        $bot = $this->bot();
+
+        foreach (range(1, 10) as $move) {
+            $bot->hearCallbackQueryData('move-to:visit:'.$booking->id.':'.($move % 2 ? $second->id : $first->id))->reply();
+        }
+
+        $this->assertSame($first->id, $booking->fresh()->visit_slot_id);
+
+        $bot->hearCallbackQueryData("move-to:visit:{$booking->id}:{$second->id}")->reply();
+
+        $this->assertSame([__('app.booking.error.too_many', [], 'ru')], $this->alerts($bot));
+        $this->assertSame($first->id, $booking->fresh()->visit_slot_id);
+        Event::assertDispatchedTimes(BookingRequested::class, 10);
+    }
+
+    public function test_somebody_elses_or_a_finished_booking_cannot_be_moved(): void
+    {
+        $this->visitor();
+        $slot = $this->visitSlot(4, '12:00');
+        $stranger = $this->bookedVisit($this->visitSlot(3, '11:00'), phone: '+998 93 000 00 00');
+        $verified = $this->visit(status: BookingStatus::Verified);
+        $cancelled = $this->visit(status: BookingStatus::Cancelled);
+
+        $bot = $this->bot();
+        $bot->hearCallbackQueryData("move-to:visit:{$stranger->id}:{$slot->id}")->reply();
+        $this->assertSame([__('app.bot.not_found', [], 'ru')], $this->alerts($bot));
+
+        foreach ([$verified, $cancelled] as $booking) {
+            $bot->hearCallbackQueryData("move-to:visit:{$booking->id}:{$slot->id}")->reply();
+            $this->assertSame([__('app.bot.move_closed', [], 'ru')], $this->alerts($bot));
+            $this->assertNull($booking->fresh()->visit_slot_id);
+        }
+
+        $this->assertNotSame($slot->id, $stranger->fresh()->visit_slot_id);
+    }
+
+    public function test_going_back_shows_the_booking_card_again(): void
+    {
+        $this->visitor();
+        $booking = $this->bookedVisit($this->visitSlot(3, '11:00'));
+
+        $bot = $this->bot();
+        $bot->hearCallbackQueryData("move-no:visit:{$booking->id}")->reply();
+
+        $this->assertStringStartsWith('<b>'.__('app.bot.type_visit', [], 'ru').'</b>', $this->texts($bot)[0]);
+        $this->assertContains("move:visit:{$booking->id}", $this->buttons($bot));
+    }
+
+    public function test_programme_titles_arrive_as_plain_text(): void
+    {
+        $this->visitor();
+        $this->registration(BookingStatus::Confirmed, '<p>Talk &amp; <strong>Tea</strong></p>');
+
+        $bot = $this->bot();
+        $bot->hearText('/mybookings')->reply();
+
+        $this->assertStringContainsString('<b>Talk &amp; Tea</b>', $this->texts($bot)[1]);
+    }
+
+    public function test_the_visitor_can_switch_the_language(): void
+    {
+        $this->visitor();
+
+        $bot = $this->bot();
+        $bot->hearCallbackQueryData('lang:en')->reply();
+
+        $this->assertSame('en', TelegramUser::query()->where('chat_id', self::CHAT)->sole()->language_code);
+        $this->assertSame([__('app.bot.language_saved', [], 'en'), __('app.bot.menu', [], 'en')], $this->texts($bot));
+    }
+
+    public function test_group_chats_are_ignored(): void
+    {
+        $bot = $this->bot(type: ChatType::GROUP);
+        $bot->hearText('/start')->reply();
+
+        $this->assertSame([], $this->sent($bot));
+        $this->assertDatabaseCount('telegram_users', 0);
+    }
+
+    public function test_the_webhook_only_takes_updates_that_carry_the_secret(): void
+    {
         $update = [
-            'update_id' => 1001,
+            'update_id' => 1,
             'message' => [
-                'message_id' => 50,
-                'from' => ['id' => $chatId, 'first_name' => 'Alisher'],
-                'chat' => ['id' => $chatId, 'type' => 'private'],
-                'date' => time(),
-                'text' => "/start {$token}",
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-
-        $response->assertOk()
-            ->assertJsonPath('ok', true);
-
-        Http::assertSent(function ($request) use ($chatId) {
-            return str_contains($request->url(), 'sendPhoto')
-                && str_contains($request->body(), (string) $chatId);
-        });
-    }
-
-    public function test_webhook_endpoint_handles_cancel_booking_callback(): void
-    {
-        $token = 'test_token_cancel_123';
-        $chatId = 87654321;
-        $queryId = 'query_abc_123';
-
-        Http::fake([
-            "*/booking/{$token}/cancel" => Http::response([
-                'success' => true,
-                'message' => 'Booking has been successfully cancelled.',
-            ], 200),
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
-
-        config(['telegram.bot_token' => 'fake_bot_token']);
-
-        $update = [
-            'update_id' => 1002,
-            'callback_query' => [
-                'id' => $queryId,
-                'from' => ['id' => $chatId, 'first_name' => 'User'],
-                'message' => [
-                    'message_id' => 60,
-                    'chat' => ['id' => $chatId, 'type' => 'private'],
-                ],
-                'data' => "cancel_do:{$token}",
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-
-        $response->assertOk()
-            ->assertJsonPath('ok', true);
-
-        Http::assertSent(function ($request) use ($queryId) {
-            return str_contains($request->url(), 'answerCallbackQuery')
-                && $request['callback_query_id'] === $queryId;
-        });
-
-        Http::assertSent(function ($request) use ($chatId) {
-            return str_contains($request->url(), 'sendMessage')
-                && $request['chat_id'] == $chatId
-                && str_contains($request['text'], 'Cancelled');
-        });
-    }
-
-    public function test_webhook_endpoint_handles_change_time_callback(): void
-    {
-        $token = 'test_token_reschedule_123';
-        $chatId = 87654321;
-        $queryId = 'query_slots_123';
-
-        Http::fake([
-            "*/booking/{$token}/available-slots" => Http::response([
-                'success' => true,
-                'type' => 'visit',
-                'days' => [
-                    [
-                        'date' => '2026-09-19',
-                        'label' => 'Sat, 19 Sep',
-                        'slots' => ['10:00', '11:00', '14:00'],
-                    ],
-                ],
-            ], 200),
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
-
-        config(['telegram.bot_token' => 'fake_bot_token']);
-
-        $update = [
-            'update_id' => 1003,
-            'callback_query' => [
-                'id' => $queryId,
-                'from' => ['id' => $chatId, 'first_name' => 'User'],
-                'message' => [
-                    'message_id' => 70,
-                    'chat' => ['id' => $chatId, 'type' => 'private'],
-                ],
-                'data' => "change_time:{$token}",
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-
-        $response->assertOk()
-            ->assertJsonPath('ok', true);
-
-        Http::assertSent(function ($request) use ($chatId) {
-            return str_contains($request->url(), 'sendMessage')
-                && $request['chat_id'] == $chatId
-                && str_contains($request['text'], 'Change Booking Time');
-        });
-    }
-
-    public function test_webhook_handles_start_without_token_with_welcome_guide(): void
-    {
-        $chatId = 999999;
-
-        Http::fake([
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
-
-        config(['telegram.bot_token' => 'fake_bot_token']);
-
-        $update = [
-            'update_id' => 1004,
-            'message' => [
-                'message_id' => 80,
-                'from' => ['id' => $chatId, 'first_name' => 'Visitor'],
-                'chat' => ['id' => $chatId, 'type' => 'private'],
-                'date' => time(),
+                'message_id' => 1,
+                'date' => now()->getTimestamp(),
+                'chat' => ['id' => self::CHAT, 'type' => 'private'],
+                'from' => ['id' => self::CHAT, 'is_bot' => false, 'first_name' => 'Dilshod', 'language_code' => 'en'],
                 'text' => '/start',
             ],
         ];
 
-        $response = $this->postJson(route('telegram.webhook'), $update);
+        $this->postJson(route('telegram.webhook'), $update)->assertForbidden();
+        $this->postJson(route('telegram.webhook'), $update, ['X-Telegram-Bot-Api-Secret-Token' => 'guess'])->assertForbidden();
+        $this->assertDatabaseCount('telegram_users', 0);
 
-        $response->assertOk()
-            ->assertJsonPath('ok', true);
+        $this->postJson(route('telegram.webhook'), $update, ['X-Telegram-Bot-Api-Secret-Token' => TelegramWebhook::secret()])->assertNoContent();
 
-        Http::assertSent(function ($request) use ($chatId) {
-            return str_contains($request->url(), 'sendMessage')
-                && $request['chat_id'] == $chatId
-                && str_contains($request['text'], 'Welcome to CCAT Booking Bot');
-        });
+        /** @var FakeNutgram $bot */
+        $bot = app(Nutgram::class);
+        $this->assertStringStartsWith(__('app.bot.welcome', [], 'en'), $this->texts($bot)[0]);
+        $this->assertDatabaseHas('telegram_users', ['chat_id' => self::CHAT, 'language_code' => 'en']);
     }
 
-    public function test_webhook_handles_reschedule_callback_and_sends_correct_time(): void
+    public function test_the_webhook_command_points_telegram_at_the_site(): void
     {
-        $ref = 'phH9S0S5Sv7zom7y';
-        $chatId = 12345678;
-        $queryId = 'query_res_123';
+        config(['nutgram.token' => '123:abc']);
 
-        Http::fake([
-            "*/booking/{$ref}/reschedule" => Http::response([
-                'success' => true,
-                'message' => 'Booking has been successfully updated.',
-                'data' => [
-                    'date_formatted' => '25 September 2026',
-                    'time' => '18:00',
-                    'building' => 'Building B, 6 Amir Temur str., Tashkent',
-                ],
-            ], 200),
-            "*/booking/{$ref}" => Http::response([
-                'success' => true,
-                'data' => [
-                    'ref' => $ref,
-                    'token' => $ref.'extra123456',
-                    'name' => 'Fayzullo Abdukhakimov',
-                    'first_name' => 'Fayzullo',
-                    'last_name' => 'Abdukhakimov',
-                    'date_formatted' => '25 September 2026',
-                    'time' => '18:00',
-                    'status_label' => 'Pending',
-                    'building' => 'Building B, 6 Amir Temur str., Tashkent',
-                    'qr_png_base64' => base64_encode('fake-qr-bytes'),
-                ],
-            ], 200),
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
+        $this->artisan('telegram:webhook')->assertSuccessful();
 
-        config([
-            'telegram.bot_token' => 'fake_bot_token',
-            'telegram.ccat_api_token' => 'test-sanctum-token-xyz',
-        ]);
+        /** @var FakeNutgram $bot */
+        $bot = app(Nutgram::class);
+        $calls = $this->sent($bot);
 
-        $update = [
-            'update_id' => 1005,
-            'callback_query' => [
-                'id' => $queryId,
-                'from' => ['id' => $chatId, 'first_name' => 'Fayzullo'],
-                'message' => [
-                    'message_id' => 90,
-                    'chat' => ['id' => $chatId, 'type' => 'private'],
-                ],
-                'data' => "res:{$ref}:2026-09-25:18-00",
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-
-        $response->assertOk()
-            ->assertJsonPath('ok', true);
-
-        Http::assertSent(function ($request) use ($ref) {
-            if (str_contains($request->url(), "/booking/{$ref}/reschedule")) {
-                $body = json_decode($request->body(), true);
-
-                return ($body['time'] ?? null) === '18:00'
-                    && ($body['date'] ?? null) === '2026-09-25'
-                    && $request->hasHeader('Authorization', 'Bearer test-sanctum-token-xyz');
-            }
-
-            return false;
-        });
-
-        $updateLegacy = [
-            'update_id' => 1006,
-            'callback_query' => [
-                'id' => 'query_legacy_456',
-                'from' => ['id' => $chatId, 'first_name' => 'Fayzullo'],
-                'message' => [
-                    'message_id' => 91,
-                    'chat' => ['id' => $chatId, 'type' => 'private'],
-                ],
-                'data' => "res:{$ref}:2026-09-25:18:00",
-            ],
-        ];
-
-        $responseLegacy = $this->postJson(route('telegram.webhook'), $updateLegacy);
-
-        $responseLegacy->assertOk()
-            ->assertJsonPath('ok', true);
-
-        Http::assertSent(function ($request) use ($ref) {
-            if (str_contains($request->url(), "/booking/{$ref}/reschedule")) {
-                $body = json_decode($request->body(), true);
-
-                return ($body['time'] ?? null) === '18:00';
-            }
-
-            return false;
-        });
+        $this->assertSame('setWebhook', $calls[0]['method']);
+        $this->assertSame(route('telegram.webhook'), $calls[0]['data']['url']);
+        $this->assertSame(TelegramWebhook::secret(), $calls[0]['data']['secret_token']);
+        $this->assertContains('setMyCommands', array_column($calls, 'method'));
     }
 
-    public function test_webhook_handles_programme_booking_and_strips_html_tags(): void
+    public function test_the_webhook_command_does_nothing_without_a_token(): void
     {
-        $token = 'AlDsLQpI86uQIhEQ0RCgEcGCGqmOssmG7UuSP7RZ0U2oP9H5i9qIpZTI9ESujQqI';
-        $chatId = 12345678;
+        config(['nutgram.token' => null]);
 
-        Http::fake([
-            "*/booking/{$token}" => Http::response([
-                'success' => true,
-                'data' => [
-                    'type' => 'programme',
-                    'badge' => 'Programme Event Pass',
-                    'token' => $token,
-                    'ref' => substr($token, 0, 16),
-                    'name' => 'Fayzullo Abdukhakimov',
-                    'first_name' => 'Fayzullo',
-                    'last_name' => 'Abdukhakimov',
-                    'date' => '2026-09-06',
-                    'date_formatted' => '06 September 2026 — 31 January 2027',
-                    'time' => '',
-                    'building' => 'CCA Tashkent (Building B, 6 Amir Temur str., Tashkent)',
-                    'event_title' => '<p>HIKMAH</p>',
-                    'event_type' => 'Exhibition',
-                    'event_venue' => 'CCA Tashkent',
-                    'status' => 'confirmed',
-                    'status_label' => 'Confirmed',
-                    'qr_png_base64' => base64_encode('fake-programme-qr'),
-                ],
-            ], 200),
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
+        $this->artisan('telegram:webhook')->assertSuccessful();
 
-        config(['telegram.bot_token' => 'fake_bot_token']);
-
-        $update = [
-            'update_id' => 1007,
-            'message' => [
-                'message_id' => 101,
-                'from' => ['id' => $chatId, 'first_name' => 'Fayzullo'],
-                'chat' => ['id' => $chatId, 'type' => 'private'],
-                'date' => time(),
-                'text' => "/start {$token}",
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-
-        $response->assertOk()
-            ->assertJsonPath('ok', true);
-
-        Http::assertSent(function ($request) {
-            return str_contains($request->url(), 'sendPhoto');
-        });
-
-        Http::assertSent(function ($request) use ($token) {
-            if (str_contains($request->url(), 'sendMessage')) {
-                $text = (string) ($request['text'] ?? '');
-
-                return str_contains($text, 'Centre for Contemporary Arts Tashkent (CCA Tashkent)')
-                    && str_contains($text, 'Programme Event Pass — Confirmed')
-                    && str_contains($text, '<b>Visitor:</b> Fayzullo Abdukhakimov')
-                    && str_contains($text, '<b>Building:</b> CCA Tashkent (Building B, 6 Amir Temur str., Tashkent)')
-                    && str_contains($text, '<b>Event:</b> HIKMAH | Exhibition')
-                    && str_contains($text, '<b>Status:</b> Confirmed')
-                    && str_contains($text, "<b>Ref:</b> <code>{$token}</code>")
-                    && str_contains($text, '📲 Show this QR code at the entrance for admission.')
-                    && str_contains($text, '~~~')
-                    && str_contains($text, 'Toshkent Zamonaviy san’at markazi')
-                    && str_contains($text, 'Dastur tadbiri chiptasi – Tasdiqlangan')
-                    && str_contains($text, '<b>Mehmon:</b> Fayzullo Abdukhakimov')
-                    && str_contains($text, '<b>Bino:</b> CCA Tashkent (Toshkent shahri, Amir Temur ko‘chasi, 6-uy, B bino)')
-                    && str_contains($text, '<b>Holati:</b> Tasdiqlangan')
-                    && str_contains($text, "<b>Iqt:</b> <code>{$token}</code>")
-                    && str_contains($text, '📲 Ushbu QR-kodni kirishda taqdim eting.')
-                    && str_contains($text, 'Центр современного искусства в Ташкенте (CCA Tashkent)')
-                    && str_contains($text, 'Пропуск на мероприятие — регистрация подтверждена')
-                    && str_contains($text, '<b>Посетитель:</b> Fayzullo Abdukhakimov')
-                    && str_contains($text, '<b>Место проведения:</b> CCA Tashkent (Здание B, ул. Амира Темура, 6, Ташкент)')
-                    && str_contains($text, '<b>Статус:</b> Регистрация подтверждена')
-                    && str_contains($text, "<b>Номер регистрации:</b> <code>{$token}</code>")
-                    && str_contains($text, '📲 Для прохода на мероприятие предъявите QR-код на входе.')
-                    && ! str_contains($text, '<p>')
-                    && ! str_contains($text, '</p>')
-                    && ! str_contains($text, '<b>Time:</b>');
-            }
-
-            return false;
-        });
-    }
-
-    public function test_webhook_handles_verified_programme_booking(): void
-    {
-        $token = 'AlDsLQpI86uQIhEQ0RCgEcGCGqmOssmG7UuSP7RZ0U2oP9H5i9qIpZTI9ESujQqI';
-        $chatId = 12345678;
-
-        Http::fake([
-            "*/booking/{$token}" => Http::response([
-                'success' => true,
-                'data' => [
-                    'type' => 'programme',
-                    'badge' => 'Programme Event Pass',
-                    'token' => $token,
-                    'ref' => substr($token, 0, 16),
-                    'name' => 'Fayzullo Abdukhakimov',
-                    'first_name' => 'Fayzullo',
-                    'last_name' => 'Abdukhakimov',
-                    'date' => '2026-09-06',
-                    'date_formatted' => '06 September 2026 — 31 January 2027',
-                    'time' => '',
-                    'building' => 'CCA Tashkent (Building B, 6 Amir Temur str., Tashkent)',
-                    'event_title' => 'HIKMAH',
-                    'event_type' => 'Exhibition',
-                    'event_venue' => 'CCA Tashkent',
-                    'status' => 'verified',
-                    'status_label' => 'Verified',
-                    'qr_png_base64' => base64_encode('fake-programme-qr'),
-                ],
-            ], 200),
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
-
-        config(['telegram.bot_token' => 'fake_bot_token']);
-
-        $update = [
-            'update_id' => 1008,
-            'message' => [
-                'message_id' => 102,
-                'from' => ['id' => $chatId, 'first_name' => 'Fayzullo'],
-                'chat' => ['id' => $chatId, 'type' => 'private'],
-                'date' => time(),
-                'text' => "/start {$token}",
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-
-        $response->assertOk()
-            ->assertJsonPath('ok', true);
-
-        Http::assertSent(function ($request) {
-            return str_contains($request->url(), 'sendPhoto');
-        });
-
-        Http::assertSent(function ($request) use ($token) {
-            if (str_contains($request->url(), 'sendMessage')) {
-                $text = (string) ($request['text'] ?? '');
-
-                return str_contains($text, 'Programme Event Pass — Verified')
-                    && str_contains($text, '<b>Status:</b> Verified')
-                    && str_contains($text, "<b>Ref:</b> <code>{$token}</code>")
-                    && str_contains($text, '✅ <i>Admission verified at the entrance. Enjoy your visit!</i>')
-                    && str_contains($text, 'Dastur tadbiri chiptasi – Tekshirilgan')
-                    && str_contains($text, '<b>Holati:</b> Tekshirilgan')
-                    && str_contains($text, "<b>Iqt:</b> <code>{$token}</code>")
-                    && str_contains($text, '✅ <i>Kirishda tasdiqlangan. Tashrifingiz maroqli o‘tsin!</i>')
-                    && str_contains($text, 'Пропуск на мероприятие — проверено')
-                    && str_contains($text, '<b>Статус:</b> Проверено')
-                    && str_contains($text, "<b>Номер регистрации:</b> <code>{$token}</code>")
-                    && str_contains($text, '✅ <i>Вход подтвержден. Приятного визита!</i>');
-            }
-
-            return false;
-        });
-    }
-
-    public function test_webhook_handles_programme_reschedule_callback(): void
-    {
-        $ref = 'AlDsLQpI86uQIhEQ';
-        $chatId = 12345678;
-        $queryId = 'query_prog_res_123';
-
-        Http::fake([
-            "*/booking/{$ref}/reschedule" => Http::response([
-                'success' => true,
-                'message' => 'Booking has been successfully updated.',
-                'data' => [
-                    'event_title' => '<p>New Programme Title</p>',
-                    'date_formatted' => '01 October 2026',
-                    'time' => '',
-                    'building' => 'Centre for Contemporary Art Tashkent',
-                ],
-            ], 200),
-            "*/booking/{$ref}" => Http::response([
-                'success' => true,
-                'data' => [
-                    'ref' => $ref,
-                    'token' => $ref.'extra123',
-                    'name' => 'Fayzullo Abdukhakimov',
-                    'first_name' => 'Fayzullo',
-                    'last_name' => 'Abdukhakimov',
-                    'date_formatted' => '01 October 2026',
-                    'time' => '',
-                    'status_label' => 'Pending',
-                    'building' => 'Centre for Contemporary Art Tashkent',
-                    'event_title' => 'New Programme Title',
-                    'qr_png_base64' => base64_encode('fake-qr'),
-                ],
-            ], 200),
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
-
-        config([
-            'telegram.bot_token' => 'fake_bot_token',
-            'telegram.ccat_api_token' => 'test-token',
-        ]);
-
-        $update = [
-            'update_id' => 1008,
-            'callback_query' => [
-                'id' => $queryId,
-                'from' => ['id' => $chatId, 'first_name' => 'Fayzullo'],
-                'message' => [
-                    'message_id' => 102,
-                    'chat' => ['id' => $chatId, 'type' => 'private'],
-                ],
-                'data' => "res:{$ref}:prog:2",
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-
-        $response->assertOk()
-            ->assertJsonPath('ok', true);
-
-        Http::assertSent(function ($request) use ($ref) {
-            if (str_contains($request->url(), "/booking/{$ref}/reschedule")) {
-                $body = json_decode($request->body(), true);
-
-                return ($body['programme_id'] ?? null) === 2;
-            }
-
-            return false;
-        });
-
-        Http::assertSent(function ($request) {
-            if (str_contains($request->url(), 'sendMessage')) {
-                $text = $request['text'] ?? '';
-                if (str_contains($text, 'Booking Successfully Updated!')) {
-                    return str_contains($text, 'New Programme Title')
-                        && ! str_contains($text, '<p>');
-                }
-            }
-
-            return false;
-        });
-    }
-
-    public function test_verified_booking_has_no_action_buttons_and_blocks_reschedule_and_cancel(): void
-    {
-        $token = 'verified_token_1234567890abcdef1234567890abcdef1234567890abcdef1234';
-        $ref = substr($token, 0, 16);
-        $chatId = 888888;
-
-        Http::fake([
-            "*/booking/{$token}" => Http::response([
-                'success' => true,
-                'data' => [
-                    'type' => 'visit',
-                    'badge' => 'Visit Pass',
-                    'token' => $token,
-                    'ref' => $ref,
-                    'name' => 'Alisher Navoiy',
-                    'first_name' => 'Alisher',
-                    'last_name' => 'Navoiy',
-                    'date' => '2026-09-17',
-                    'date_formatted' => '17 September 2026',
-                    'time' => '10:00',
-                    'building' => 'Building B, 6 Amir Temur str., Tashkent',
-                    'status' => 'verified',
-                    'status_label' => 'Verified',
-                    'can_change_time' => false,
-                    'can_cancel' => false,
-                    'qr_png_base64' => base64_encode('fake-verified-qr'),
-                ],
-            ], 200),
-            "*/booking/{$ref}" => Http::response([
-                'success' => true,
-                'data' => [
-                    'type' => 'visit',
-                    'badge' => 'Visit Pass',
-                    'token' => $token,
-                    'ref' => $ref,
-                    'name' => 'Alisher Navoiy',
-                    'first_name' => 'Alisher',
-                    'last_name' => 'Navoiy',
-                    'date' => '2026-09-17',
-                    'date_formatted' => '17 September 2026',
-                    'time' => '10:00',
-                    'building' => 'Building B, 6 Amir Temur str., Tashkent',
-                    'status' => 'verified',
-                    'status_label' => 'Verified',
-                    'can_change_time' => false,
-                    'can_cancel' => false,
-                    'qr_png_base64' => base64_encode('fake-verified-qr'),
-                ],
-            ], 200),
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
-
-        config(['telegram.bot_token' => 'fake_bot_token']);
-
-        $updateStart = [
-            'update_id' => 2001,
-            'message' => [
-                'message_id' => 201,
-                'from' => ['id' => $chatId, 'first_name' => 'Alisher'],
-                'chat' => ['id' => $chatId, 'type' => 'private'],
-                'date' => time(),
-                'text' => "/start {$token}",
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $updateStart);
-        $response->assertOk();
-
-        Http::assertSent(function ($request) {
-            return str_contains($request->url(), 'sendPhoto');
-        });
-
-        Http::assertSent(function ($request) {
-            if (str_contains($request->url(), 'sendMessage')) {
-                $text = (string) ($request['text'] ?? '');
-                $body = $request->body();
-
-                return str_contains($text, 'Verified')
-                    && str_contains($text, 'Admission verified at the entrance')
-                    && ! str_contains($body, 'Change Time')
-                    && ! str_contains($body, 'Cancel Booking');
-            }
-
-            return false;
-        });
-
-        $updateChangeTime = [
-            'update_id' => 2002,
-            'callback_query' => [
-                'id' => 'query_time_reject',
-                'from' => ['id' => $chatId, 'first_name' => 'Alisher'],
-                'message' => [
-                    'message_id' => 202,
-                    'chat' => ['id' => $chatId, 'type' => 'private'],
-                ],
-                'data' => "c_time:{$ref}",
-            ],
-        ];
-
-        $resChange = $this->postJson(route('telegram.webhook'), $updateChangeTime);
-        $resChange->assertOk();
-
-        Http::assertSent(function ($request) {
-            if (str_contains($request->url(), 'sendMessage')) {
-                $text = $request['text'] ?? '';
-
-                return str_contains($text, 'Action Not Allowed')
-                    && str_contains($text, 'already been verified');
-            }
-
-            return false;
-        });
-
-        $updateCancel = [
-            'update_id' => 2003,
-            'callback_query' => [
-                'id' => 'query_cancel_reject',
-                'from' => ['id' => $chatId, 'first_name' => 'Alisher'],
-                'message' => [
-                    'message_id' => 203,
-                    'chat' => ['id' => $chatId, 'type' => 'private'],
-                ],
-                'data' => "c_conf:{$ref}",
-            ],
-        ];
-
-        $resCancel = $this->postJson(route('telegram.webhook'), $updateCancel);
-        $resCancel->assertOk();
-
-        Http::assertSent(function ($request) {
-            if (str_contains($request->url(), 'sendMessage')) {
-                $text = $request['text'] ?? '';
-
-                return str_contains($text, 'Action Not Allowed')
-                    && str_contains($text, 'already been verified and attendance recorded. It cannot be cancelled');
-            }
-
-            return false;
-        });
-    }
-
-    public function test_webhook_handles_programme_booking_with_rich_translations_and_time(): void
-    {
-        $token = '7890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12345678';
-        $chatId = 99887766;
-
-        Http::fake([
-            "*/booking/{$token}" => Http::response([
-                'success' => true,
-                'data' => [
-                    'type' => 'programme',
-                    'badge' => 'Programme Event Pass',
-                    'token' => $token,
-                    'ref' => substr($token, 0, 16),
-                    'name' => 'Dilshod Rahmatov',
-                    'first_name' => 'Dilshod',
-                    'last_name' => 'Rahmatov',
-                    'date' => '2026-10-15',
-                    'date_formatted' => '15 October 2026',
-                    'time' => '14:30',
-                    'building' => 'CCA Tashkent (Building B, 6 Amir Temur str., Tashkent)',
-                    'event_title' => 'Masterclass: Contemporary Sculpture',
-                    'event_type' => 'Masterclass',
-                    'event_venue' => 'CCA Tashkent',
-                    'status' => 'confirmed',
-                    'status_label' => 'Confirmed',
-                    'qr_png_base64' => base64_encode('fake-sculpture-qr'),
-                    'translations' => [
-                        'en' => [
-                            'event_title' => 'Masterclass: Contemporary Sculpture',
-                            'event_type' => 'Masterclass',
-                            'event_venue' => 'CCA Tashkent',
-                            'building' => 'CCA Tashkent (Building B, 6 Amir Temur str., Tashkent)',
-                            'date_formatted' => '15 October 2026',
-                        ],
-                        'uz' => [
-                            'event_title' => 'Mahorat darsi: Zamonaviy haykaltaroshlik',
-                            'event_type' => 'Mahorat darsi',
-                            'event_venue' => 'CCA Tashkent',
-                            'building' => 'CCA Tashkent (Toshkent shahri, Amir Temur ko‘chasi, 6-uy, B bino)',
-                            'date_formatted' => '15-oktabr, 2026',
-                        ],
-                        'ru' => [
-                            'event_title' => 'Мастер-класс: Современная скульптура',
-                            'event_type' => 'Мастер-класс',
-                            'event_venue' => 'CCA Tashkent',
-                            'building' => 'CCA Tashkent (Здание B, ул. Амира Темура, 6, Ташкент)',
-                            'date_formatted' => '15 октября 2026 г.',
-                        ],
-                    ],
-                ],
-            ], 200),
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
-
-        config(['telegram.bot_token' => 'fake_bot_token']);
-
-        $update = [
-            'update_id' => 3001,
-            'message' => [
-                'message_id' => 301,
-                'from' => ['id' => $chatId, 'first_name' => 'Dilshod'],
-                'chat' => ['id' => $chatId, 'type' => 'private'],
-                'date' => time(),
-                'text' => "/start {$token}",
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-        $response->assertOk()
-            ->assertJsonPath('ok', true);
-
-        Http::assertSent(function ($request) {
-            return str_contains($request->url(), 'sendPhoto');
-        });
-
-        Http::assertSent(function ($request) use ($token) {
-            if (str_contains($request->url(), 'sendMessage')) {
-                $text = (string) ($request['text'] ?? '');
-
-                return str_contains($text, 'Centre for Contemporary Arts Tashkent (CCA Tashkent)')
-                    && str_contains($text, 'Programme Event Pass — Confirmed')
-                    && str_contains($text, '<b>Visitor:</b> Dilshod Rahmatov')
-                    && str_contains($text, '<b>Date:</b> 15 October 2026')
-                    && str_contains($text, '🕒 <b>Time:</b> 14:30')
-                    && str_contains($text, '<b>Building:</b> CCA Tashkent (Building B, 6 Amir Temur str., Tashkent)')
-                    && str_contains($text, '<b>Event:</b> Masterclass: Contemporary Sculpture | Masterclass')
-                    && str_contains($text, '<b>Status:</b> Confirmed')
-                    && str_contains($text, "<b>Ref:</b> <code>{$token}</code>")
-                    && str_contains($text, '📲 Show this QR code at the entrance for admission.')
-                    && str_contains($text, '~~~')
-                    && str_contains($text, 'Toshkent Zamonaviy san’at markazi')
-                    && str_contains($text, 'Dastur tadbiri chiptasi – Tasdiqlangan')
-                    && str_contains($text, '<b>Mehmon:</b> Dilshod Rahmatov')
-                    && str_contains($text, '<b>Sana:</b> 15-oktabr, 2026')
-                    && str_contains($text, '🕒 <b>Vaqti:</b> 14:30')
-                    && str_contains($text, '<b>Bino:</b> CCA Tashkent (Toshkent shahri, Amir Temur ko‘chasi, 6-uy, B bino)')
-                    && str_contains($text, '<b>Tadbir:</b> Mahorat darsi: Zamonaviy haykaltaroshlik | Mahorat darsi')
-                    && str_contains($text, '<b>Holati:</b> Tasdiqlangan')
-                    && str_contains($text, "<b>Iqt:</b> <code>{$token}</code>")
-                    && str_contains($text, '📲 Ushbu QR-kodni kirishda taqdim eting.')
-                    && str_contains($text, 'Центр современного искусства в Ташкенте (CCA Tashkent)')
-                    && str_contains($text, 'Пропуск на мероприятие — регистрация подтверждена')
-                    && str_contains($text, '<b>Посетитель:</b> Dilshod Rahmatov')
-                    && str_contains($text, '<b>Дата:</b> 15 октября 2026 г.')
-                    && str_contains($text, '🕒 <b>Время:</b> 14:30')
-                    && str_contains($text, '<b>Место проведения:</b> CCA Tashkent (Здание B, ул. Амира Темура, 6, Ташкент)')
-                    && str_contains($text, '<b>Мероприятие:</b> Мастер-класс: Современная скульптура | Мастер-класс')
-                    && str_contains($text, '<b>Статус:</b> Регистрация подтверждена')
-                    && str_contains($text, "<b>Номер регистрации:</b> <code>{$token}</code>")
-                    && str_contains($text, '📲 Для прохода на мероприятие предъявите QR-код на входе.');
-            }
-
-            return false;
-        });
-    }
-
-    public function test_webhook_handles_general_visit_booking_with_3_languages(): void
-    {
-        $token = 'visit_token_1234567890abcdef1234567890abcdef1234567890abcdef12345678';
-        $chatId = 11223344;
-
-        Http::fake([
-            "*/booking/{$token}" => Http::response([
-                'success' => true,
-                'data' => [
-                    'type' => 'visit',
-                    'badge' => 'General Visit Pass',
-                    'token' => $token,
-                    'ref' => substr($token, 0, 16),
-                    'name' => 'Alisher Navoiy',
-                    'first_name' => 'Alisher',
-                    'last_name' => 'Navoiy',
-                    'date' => '2026-09-18',
-                    'date_formatted' => '18 September 2026',
-                    'time' => '10:00',
-                    'building' => 'CCA Tashkent',
-                    'status' => 'confirmed',
-                    'status_label' => 'Confirmed',
-                    'qr_png_base64' => base64_encode('fake-visit-qr'),
-                    'translations' => [
-                        'en' => [
-                            'building' => 'CCA Tashkent',
-                            'date_formatted' => '18 September 2026',
-                        ],
-                        'uz' => [
-                            'building' => 'Toshkent Zamonaviy san’at markazi (Toshkent shahri, Amir Temur ko‘chasi, 6-uy, B bino)',
-                            'date_formatted' => '18-sentabr, 2026',
-                        ],
-                        'ru' => [
-                            'building' => 'CCA Tashkent (Здание B, ул. Амира Темура, 6, Ташкент)',
-                            'date_formatted' => '18 сентября 2026 г.',
-                        ],
-                    ],
-                ],
-            ], 200),
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
-
-        config(['telegram.bot_token' => 'fake_bot_token']);
-
-        $update = [
-            'update_id' => 4001,
-            'message' => [
-                'message_id' => 401,
-                'from' => ['id' => $chatId, 'first_name' => 'Alisher'],
-                'chat' => ['id' => $chatId, 'type' => 'private'],
-                'date' => time(),
-                'text' => "/start {$token}",
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-        $response->assertOk()
-            ->assertJsonPath('ok', true);
-
-        Http::assertSent(function ($request) {
-            return str_contains($request->url(), 'sendPhoto');
-        });
-
-        Http::assertSent(function ($request) use ($token) {
-            if (str_contains($request->url(), 'sendMessage')) {
-                $text = (string) ($request['text'] ?? '');
-
-                return str_contains($text, 'Centre for Contemporary Arts Tashkent (CCA Tashkent)')
-                    && str_contains($text, 'General Visit Pass — Confirmed')
-                    && str_contains($text, '<b>Visitor:</b> Alisher Navoiy')
-                    && str_contains($text, '<b>Date:</b> 18 September 2026')
-                    && str_contains($text, '⏰ <b>Time:</b> 10:00')
-                    && str_contains($text, '<b>Building:</b> <a href="https://yandex.com/maps/org/toshkent_zamonaviy_san_at_markazi/137769933130?si=6rjq924p4qvrv7t8abkdnqzef0">Centre for Contemporary Arts Tashkent (Building B, 6 Amir Temur str., Tashkent)</a>')
-                    && str_contains($text, '<b>Status:</b> Confirmed')
-                    && str_contains($text, "<b>Ref:</b> <code>{$token}</code>")
-                    && str_contains($text, '📲 Please present this QR code at the entrance for admission.')
-                    && str_contains($text, '~~~')
-                    && str_contains($text, 'Toshkent Zamonaviy san’at markazi')
-                    && str_contains($text, 'Umumiy tashrif chiptasi – Tasdiqlangan')
-                    && str_contains($text, '<b>Mehmon:</b> Alisher Navoiy')
-                    && str_contains($text, '<b>Sana:</b> 18-sentabr, 2026')
-                    && str_contains($text, '⏰ <b>Vaqti:</b> 10:00')
-                    && str_contains($text, '<b>Bino:</b> <a href="https://yandex.com/maps/org/toshkent_zamonaviy_san_at_markazi/137769933130?si=6rjq924p4qvrv7t8abkdnqzef0">Toshkent Zamonaviy san’at markazi (Toshkent shahri, Amir Temur ko‘chasi, 6-uy, B bino)</a>')
-                    && str_contains($text, '<b>Holati:</b> Tasdiqlangan')
-                    && str_contains($text, "<b>Iqt:</b> <code>{$token}</code>")
-                    && str_contains($text, '📲 Ushbu QR-kodni kirishda taqdim eting.')
-                    && str_contains($text, 'Центр современного искусства в Ташкенте (CCA Tashkent)')
-                    && str_contains($text, 'Пропуск для общего посещения — регистрация подтверждена')
-                    && str_contains($text, '<b>Посетитель:</b> Alisher Navoiy')
-                    && str_contains($text, '<b>Дата:</b> 18 сентября 2026 г.')
-                    && str_contains($text, '⏰ <b>Время:</b> 10:00')
-                    && str_contains($text, '<b>Место:</b> <a href="https://yandex.com/maps/org/toshkent_zamonaviy_san_at_markazi/137769933130?si=6rjq924p4qvrv7t8abkdnqzef0">Центр современного искусства в Ташкенте (Здание B, ул. Амира Темура, 6, Ташкент)</a>')
-                    && str_contains($text, '<b>Статус:</b> Регистрация подтверждена')
-                    && str_contains($text, "<b>Номер регистрации:</b> <code>{$token}</code>")
-                    && str_contains($text, '📲 Для прохода в Центр предъявите данный QR-код на входе.');
-            }
-
-            return false;
-        });
-    }
-
-    public function test_webhook_handles_library_booking_with_3_languages(): void
-    {
-        $token = 'lib_token_1234567890abcdef1234567890abcdef1234567890abcdef1234567890';
-        $chatId = 33445566;
-
-        Http::fake([
-            "*/booking/{$token}" => Http::response([
-                'success' => true,
-                'data' => [
-                    'type' => 'library',
-                    'badge' => 'CCA Tashkent Library Pass',
-                    'token' => $token,
-                    'ref' => substr($token, 0, 16),
-                    'name' => 'Nodir Sodiq',
-                    'first_name' => 'Nodir',
-                    'last_name' => 'Sodiq',
-                    'date' => '2026-09-18',
-                    'date_formatted' => '18 September 2026',
-                    'time' => '10:00 – 12:00',
-                    'building' => 'CCA Tashkent Library (Service Building, 3rd Floor)',
-                    'status' => 'confirmed',
-                    'status_label' => 'Confirmed',
-                    'qr_png_base64' => base64_encode('fake-library-qr'),
-                    'translations' => [
-                        'en' => [
-                            'building' => 'CCA Tashkent Library (Service Building, 3rd Floor)',
-                            'date_formatted' => '18 September 2026',
-                        ],
-                        'uz' => [
-                            'building' => 'Toshkent Zamonaviy san’at markazi kutubxonasi (Xizmat ko‘rsatish binosi, 3-qavat)',
-                            'date_formatted' => '18-sentabr, 2026',
-                        ],
-                        'ru' => [
-                            'building' => 'Библиотека CCA Tashkent (Служебное здание, 3-й этаж)',
-                            'date_formatted' => '18 сентября 2026 г.',
-                        ],
-                    ],
-                ],
-            ], 200),
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
-
-        config(['telegram.bot_token' => 'fake_bot_token']);
-
-        $update = [
-            'update_id' => 5001,
-            'message' => [
-                'message_id' => 501,
-                'from' => ['id' => $chatId, 'first_name' => 'Nodir'],
-                'chat' => ['id' => $chatId, 'type' => 'private'],
-                'date' => time(),
-                'text' => "/start {$token}",
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-        $response->assertOk()
-            ->assertJsonPath('ok', true);
-
-        Http::assertSent(function ($request) {
-            return str_contains($request->url(), 'sendPhoto');
-        });
-
-        Http::assertSent(function ($request) use ($token) {
-            if (str_contains($request->url(), 'sendMessage')) {
-                $text = (string) ($request['text'] ?? '');
-
-                $checks = [
-                    'c1' => str_contains($text, 'Centre for Contemporary Arts Tashkent (CCA Tashkent)'),
-                    'c2' => str_contains($text, 'CCA Tashkent Library Pass — Confirmed'),
-                    'c3' => str_contains($text, '<b>Visitor:</b> Nodir Sodiq'),
-                    'c4' => str_contains($text, '<b>Date:</b> 18 September 2026'),
-                    'c5' => str_contains($text, '⏰ <b>Time:</b> 10:00 – 12:00'),
-                    'c6' => str_contains($text, '<b>Location:</b> CCA Tashkent Library (Service Building, 3rd Floor)'),
-                    'c7' => str_contains($text, '<b>Status:</b> Confirmed'),
-                    'c8' => str_contains($text, "<b>Ref:</b> <code>{$token}</code>"),
-                    'c9' => str_contains($text, '📲 Please present this QR code at the entrance for admission.'),
-                    'c10' => str_contains($text, '~~~'),
-                    'c11' => str_contains($text, 'Toshkent Zamonaviy san’at markazi'),
-                    'c12' => str_contains($text, 'CCA kutubxonasi chiptasi – Tasdiqlangan'),
-                    'c13' => str_contains($text, '<b>Mehmon:</b> Nodir Sodiq'),
-                    'c14' => str_contains($text, '<b>Sana:</b> 18-sentabr, 2026'),
-                    'c15' => str_contains($text, '⏰ <b>Vaqti:</b> 10:00 – 12:00'),
-                    'c16' => str_contains($text, '<b>Manzil:</b> Toshkent Zamonaviy san’at markazi kutubxonasi (Xizmat ko‘rsatish binosi, 3-qavat)'),
-                    'c17' => str_contains($text, '<b>Holati:</b> Tasdiqlangan'),
-                    'c18' => str_contains($text, "<b>Iqt:</b> <code>{$token}</code>"),
-                    'c19' => str_contains($text, '📲 Ushbu QR-kodni kirishda taqdim eting.'),
-                    'c20' => str_contains($text, 'Центр современного искусства в Ташкенте (CCA Tashkent)'),
-                    'c21' => str_contains($text, 'Пропуск в библиотеку CCA Tashkent — регистрация подтверждена'),
-                    'c22' => str_contains($text, '<b>Посетитель:</b> Nodir Sodiq'),
-                    'c23' => str_contains($text, '<b>Дата:</b> 18 сентября 2026 г.'),
-                    'c24' => str_contains($text, '⏰ <b>Время:</b> 10:00 – 12:00'),
-                    'c25' => str_contains($text, '<b>Место:</b> Библиотека CCA Tashkent (Служебное здание, 3-й этаж)'),
-                    'c26' => str_contains($text, '<b>Статус:</b> Регистрация подтверждена'),
-                    'c27' => str_contains($text, "<b>Номер регистрации:</b> <code>{$token}</code>"),
-                    'c28' => str_contains($text, '📲 Для прохода в библиотеку предъявите данный QR-код на входе.'),
-                ];
-
-                return ! in_array(false, $checks, true);
-            }
-
-            return false;
-        });
-    }
-
-    public function test_webhook_handles_start_with_token_links_telegram_user(): void
-    {
-        $token = 'visit_token_link_test_123456';
-        $chatId = 99887766;
-
-        Http::fake([
-            "*/telegram/{$chatId}/bookings" => Http::response([
-                'success' => true,
-                'data' => [
-                    'user' => ['id' => 1, 'chat_id' => $chatId],
-                    'booking' => ['token' => $token],
-                ],
-            ], 200),
-            "*/booking/{$token}" => Http::response([
-                'success' => true,
-                'data' => [
-                    'type' => 'visit',
-                    'token' => $token,
-                    'ref' => substr($token, 0, 16),
-                    'name' => 'Fayzullo Abduhakimov',
-                    'first_name' => 'Fayzullo',
-                    'last_name' => 'Abduhakimov',
-                    'date' => '2026-09-25',
-                    'date_formatted' => '25 September 2026',
-                    'time' => '11:00',
-                    'building' => 'CCA Tashkent',
-                    'status' => 'confirmed',
-                    'status_label' => 'Confirmed',
-                    'qr_png_base64' => base64_encode('fake-qr'),
-                ],
-            ], 200),
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
-
-        config(['telegram.bot_token' => 'fake_bot_token']);
-
-        $update = [
-            'update_id' => 5001,
-            'message' => [
-                'message_id' => 501,
-                'from' => [
-                    'id' => $chatId,
-                    'username' => 'fabduhakimov',
-                    'first_name' => 'Fayzullo',
-                    'last_name' => 'Abduhakimov',
-                    'language_code' => 'ru',
-                ],
-                'chat' => ['id' => $chatId, 'type' => 'private'],
-                'date' => time(),
-                'text' => "/start {$token}",
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-        $response->assertOk()->assertJsonPath('ok', true);
-
-        // Verify linkTelegramBooking API was called
-        Http::assertSent(function ($request) use ($chatId, $token) {
-            return str_contains($request->url(), "/telegram/{$chatId}/bookings")
-                && $request->method() === 'POST'
-                && ($request['token'] ?? '') === $token
-                && ($request['username'] ?? '') === 'fabduhakimov';
-        });
-
-        // Verify photo pass was sent
-        Http::assertSent(function ($request) {
-            return str_contains($request->url(), 'sendPhoto');
-        });
-    }
-
-    public function test_webhook_handles_mybookings_command_with_active_bookings(): void
-    {
-        $chatId = 88776655;
-
-        Http::fake([
-            "*/telegram/{$chatId}/bookings*" => Http::response([
-                'success' => true,
-                'count' => 2,
-                'data' => [
-                    [
-                        'type' => 'visit',
-                        'token' => 'tok_visit_1',
-                        'ref' => 'tok_visit_1',
-                        'name' => 'John Doe',
-                        'date_formatted' => '26 September 2026',
-                        'time' => '14:00',
-                        'status' => 'confirmed',
-                    ],
-                    [
-                        'type' => 'programme',
-                        'token' => 'tok_prog_2',
-                        'ref' => 'tok_prog_2',
-                        'name' => 'John Doe',
-                        'date_formatted' => '28 September 2026',
-                        'time' => '',
-                        'event_title' => 'Contemporary Art Masterclass',
-                        'status' => 'confirmed',
-                    ],
-                ],
-            ], 200),
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
-
-        config(['telegram.bot_token' => 'fake_bot_token']);
-
-        $update = [
-            'update_id' => 5002,
-            'message' => [
-                'message_id' => 502,
-                'from' => [
-                    'id' => $chatId,
-                    'first_name' => 'John',
-                    'language_code' => 'en',
-                ],
-                'chat' => ['id' => $chatId, 'type' => 'private'],
-                'date' => time(),
-                'text' => '/mybookings',
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-        $response->assertOk()->assertJsonPath('ok', true);
-
-        Http::assertSent(function ($request) use ($chatId) {
-            if (str_contains($request->url(), 'sendMessage')) {
-                $text = (string) ($request['text'] ?? '');
-                $replyMarkup = (string) ($request['reply_markup'] ?? '');
-
-                return $request['chat_id'] == $chatId
-                    && str_contains($text, 'My Bookings')
-                    && str_contains($text, 'tok_visit_1')
-                    && str_contains($text, 'Contemporary Art Masterclass')
-                    && str_contains($replyMarkup, 'view:tok_visit_1')
-                    && str_contains($replyMarkup, 'view:tok_prog_2');
-            }
-
-            return false;
-        });
-    }
-
-    public function test_webhook_handles_mybookings_command_when_no_active_bookings(): void
-    {
-        $chatId = 88776656;
-
-        Http::fake([
-            "*/telegram/{$chatId}/bookings*" => Http::response([
-                'success' => true,
-                'count' => 0,
-                'data' => [],
-            ], 200),
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
-
-        config(['telegram.bot_token' => 'fake_bot_token']);
-
-        $update = [
-            'update_id' => 5003,
-            'message' => [
-                'message_id' => 503,
-                'from' => [
-                    'id' => $chatId,
-                    'first_name' => 'Alice',
-                    'language_code' => 'ru',
-                ],
-                'chat' => ['id' => $chatId, 'type' => 'private'],
-                'date' => time(),
-                'text' => '📋 Мои бронирования',
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-        $response->assertOk()->assertJsonPath('ok', true);
-
-        Http::assertSent(function ($request) use ($chatId) {
-            if (str_contains($request->url(), 'sendMessage')) {
-                $text = (string) ($request['text'] ?? '');
-
-                return $request['chat_id'] == $chatId
-                    && str_contains($text, 'Мои бронирования')
-                    && str_contains($text, 'У вас пока нет активных бронирований');
-            }
-
-            return false;
-        });
-    }
-
-    public function test_webhook_handles_start_without_token_shows_bookings_if_user_has_bookings(): void
-    {
-        $chatId = 88776657;
-
-        Http::fake([
-            "*/telegram/{$chatId}/bookings*" => Http::response([
-                'success' => true,
-                'count' => 1,
-                'data' => [
-                    [
-                        'type' => 'visit',
-                        'token' => 'tok_visit_active',
-                        'ref' => 'tok_visit_active',
-                        'name' => 'Alice',
-                        'date_formatted' => '27 September 2026',
-                        'time' => '10:00',
-                        'status' => 'confirmed',
-                    ],
-                ],
-            ], 200),
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
-
-        config(['telegram.bot_token' => 'fake_bot_token']);
-
-        $update = [
-            'update_id' => 5004,
-            'message' => [
-                'message_id' => 504,
-                'from' => [
-                    'id' => $chatId,
-                    'first_name' => 'Alice',
-                    'language_code' => 'uz',
-                ],
-                'chat' => ['id' => $chatId, 'type' => 'private'],
-                'date' => time(),
-                'text' => '/start',
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-        $response->assertOk()->assertJsonPath('ok', true);
-
-        Http::assertSent(function ($request) use ($chatId) {
-            if (str_contains($request->url(), 'sendMessage')) {
-                $text = (string) ($request['text'] ?? '');
-                $replyMarkup = (string) ($request['reply_markup'] ?? '');
-
-                return $request['chat_id'] == $chatId
-                    && str_contains($text, 'Mening bandliklarim')
-                    && str_contains($text, 'tok_visit_active')
-                    && str_contains($replyMarkup, 'view:tok_visit_active');
-            }
-
-            return false;
-        });
-    }
-
-    public function test_webhook_handles_my_bookings_callback_query(): void
-    {
-        $chatId = 88776658;
-        $queryId = 'cb_my_123';
-
-        Http::fake([
-            "*/telegram/{$chatId}/bookings*" => Http::response([
-                'success' => true,
-                'count' => 1,
-                'data' => [
-                    [
-                        'type' => 'library',
-                        'token' => 'tok_lib_active',
-                        'ref' => 'tok_lib_active',
-                        'name' => 'Bob',
-                        'date_formatted' => '29 September 2026',
-                        'time' => '14:00 - 16:00',
-                        'status' => 'confirmed',
-                    ],
-                ],
-            ], 200),
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
-
-        config(['telegram.bot_token' => 'fake_bot_token']);
-
-        $update = [
-            'update_id' => 5005,
-            'callback_query' => [
-                'id' => $queryId,
-                'from' => [
-                    'id' => $chatId,
-                    'first_name' => 'Bob',
-                    'language_code' => 'en',
-                ],
-                'message' => [
-                    'message_id' => 505,
-                    'chat' => ['id' => $chatId, 'type' => 'private'],
-                ],
-                'data' => 'my_bookings',
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-        $response->assertOk()->assertJsonPath('ok', true);
-
-        Http::assertSent(function ($request) use ($queryId) {
-            return str_contains($request->url(), 'answerCallbackQuery')
-                && ($request['callback_query_id'] ?? '') === $queryId;
-        });
-
-        Http::assertSent(function ($request) use ($chatId) {
-            if (str_contains($request->url(), 'sendMessage')) {
-                $text = (string) ($request['text'] ?? '');
-                $replyMarkup = (string) ($request['reply_markup'] ?? '');
-
-                return $request['chat_id'] == $chatId
-                    && str_contains($text, 'tok_lib_active')
-                    && str_contains($replyMarkup, 'view:tok_lib_active');
-            }
-
-            return false;
-        });
-    }
-
-    public function test_register_bot_commands_calls_telegram_api(): void
-    {
-        Http::fake([
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => true], 200),
-        ]);
-
-        config(['telegram.bot_token' => 'fake_bot_token']);
-
-        /** @var TelegramService $telegram */
-        $telegram = app(TelegramService::class);
-        $telegram->registerBotCommands();
-
-        Http::assertSent(function ($request) {
-            return str_contains($request->url(), 'setMyCommands');
-        });
-    }
-
-    public function test_webhook_handles_language_command_and_displays_options(): void
-    {
-        $chatId = 77665544;
-
-        Http::fake([
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
-
-        config(['telegram.bot_token' => 'fake_bot_token']);
-
-        $update = [
-            'update_id' => 6001,
-            'message' => [
-                'message_id' => 601,
-                'from' => ['id' => $chatId, 'first_name' => 'User'],
-                'chat' => ['id' => $chatId, 'type' => 'private'],
-                'date' => time(),
-                'text' => '/language',
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-        $response->assertOk()->assertJsonPath('ok', true);
-
-        Http::assertSent(function ($request) use ($chatId) {
-            if (str_contains($request->url(), 'sendMessage')) {
-                $text = (string) ($request['text'] ?? '');
-                $replyMarkup = (string) ($request['reply_markup'] ?? '');
-
-                return $request['chat_id'] == $chatId
-                    && str_contains($text, 'Choose language')
-                    && str_contains($replyMarkup, 'lang:ru')
-                    && str_contains($replyMarkup, 'lang:uz')
-                    && str_contains($replyMarkup, 'lang:en');
-            }
-
-            return false;
-        });
-    }
-
-    public function test_webhook_handles_set_language_callback(): void
-    {
-        $chatId = 77665545;
-        $queryId = 'q_set_lang_123';
-
-        Http::fake([
-            "*/telegram/{$chatId}/language" => Http::response([
-                'success' => true,
-                'message' => 'Language updated successfully.',
-            ], 200),
-            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
-        ]);
-
-        config(['telegram.bot_token' => 'fake_bot_token']);
-
-        $update = [
-            'update_id' => 6002,
-            'callback_query' => [
-                'id' => $queryId,
-                'from' => [
-                    'id' => $chatId,
-                    'first_name' => 'User',
-                    'language_code' => 'en',
-                ],
-                'message' => [
-                    'message_id' => 602,
-                    'chat' => ['id' => $chatId, 'type' => 'private'],
-                ],
-                'data' => 'lang:ru',
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-        $response->assertOk()->assertJsonPath('ok', true);
-
-        Http::assertSent(function ($request) use ($queryId) {
-            return str_contains($request->url(), 'answerCallbackQuery')
-                && ($request['callback_query_id'] ?? '') === $queryId
-                && str_contains((string) ($request['text'] ?? ''), 'Русский');
-        });
-
-        Http::assertSent(function ($request) use ($chatId) {
-            if (str_contains($request->url(), 'sendMessage')) {
-                $text = (string) ($request['text'] ?? '');
-
-                return $request['chat_id'] == $chatId
-                    && str_contains($text, 'Язык успешно изменён на Русский');
-            }
-
-            return false;
-        });
-    }
-
-    public function test_webhook_dispatches_process_telegram_update_job(): void
-    {
-        \Illuminate\Support\Facades\Queue::fake();
-
-        $update = [
-            'update_id' => 9999,
-            'message' => [
-                'message_id' => 99,
-                'chat' => ['id' => 12345, 'type' => 'private'],
-                'text' => '/help',
-            ],
-        ];
-
-        $response = $this->postJson(route('telegram.webhook'), $update);
-
-        $response->assertOk()->assertJsonPath('ok', true);
-
-        \Illuminate\Support\Facades\Queue::assertPushed(\App\Jobs\ProcessTelegramUpdate::class, function ($job) use ($update) {
-            return $job->update === $update;
-        });
+        /** @var FakeNutgram $bot */
+        $bot = app(Nutgram::class);
+        $this->assertSame([], $bot->getRequestHistory());
     }
 }
